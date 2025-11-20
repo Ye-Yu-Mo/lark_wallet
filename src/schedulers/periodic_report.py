@@ -618,10 +618,15 @@ class PeriodicReportTask:
 
             # 发送消息
             import requests
+            proxies = {
+                'http': 'http://127.0.0.1:7890',
+                'https': 'http://127.0.0.1:7890'
+            }
             response = requests.post(
                 self.alert_manager.webhook_url,
                 json=card,
-                timeout=10
+                timeout=10,
+                proxies=proxies
             )
 
             if response.status_code == 200:

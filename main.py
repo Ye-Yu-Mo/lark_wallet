@@ -22,6 +22,12 @@ from schedulers.crypto_sync import sync_crypto
 from schedulers.fund_sync import sync_fund
 from schedulers.snapshot import create_daily_snapshot
 from schedulers.asset_distribution_sync import sync_asset_distribution
+from schedulers.daily_report import send_daily_report
+from schedulers.price_alert import check_price_alerts
+from schedulers.periodic_report import generate_weekly_report, generate_monthly_report
+from schedulers.milestone_alert import check_milestones
+from schedulers.holding_period_reminder import check_holding_periods
+from schedulers.sync_error_summary import generate_error_summary
 from utils.backup import create_backup
 from utils.alert import AlertManager
 
@@ -148,7 +154,130 @@ class AssetSyncService:
             )
             logger.info(f"已注册任务: 资产分布同步 (每天 {hour:02d}:{minute:02d})")
 
-        # 5. 数据库备份任务 (每天凌晨 1点)
+        # 5. 每日报告任务 (每天早上 9:30)
+        report_config = scheduler_config.get('daily_report', {})
+        if report_config.get('enabled', False):
+            hour = report_config.get('hour', 9)
+            minute = report_config.get('minute', 30)
+
+            self.scheduler.add_job(
+                func=lambda: send_daily_report(self.config_path),
+                trigger='cron',
+                hour=hour,
+                minute=minute,
+                id='daily_report',
+                name='每日报告',
+                replace_existing=True
+            )
+            logger.info(f"已注册任务: 每日报告 (每天 {hour:02d}:{minute:02d})")
+
+        # 6. 价格波动告警任务 (每小时执行一次,在5分钟时)
+        alert_config = scheduler_config.get('price_alert', {})
+        if alert_config.get('enabled', False):
+            hour = alert_config.get('hour', '*')
+            minute = alert_config.get('minute', 5)
+
+            self.scheduler.add_job(
+                func=lambda: check_price_alerts(self.config_path),
+                trigger='cron',
+                hour=hour,
+                minute=minute,
+                id='price_alert',
+                name='价格波动告警',
+                replace_existing=True
+            )
+            logger.info(f"已注册任务: 价格波动告警 (每小时 {minute}分)")
+
+        # 7. 周报任务 (每周一早上 9:00)
+        weekly_report_config = scheduler_config.get('weekly_report', {})
+        if weekly_report_config.get('enabled', False):
+            day_of_week = weekly_report_config.get('day_of_week', 'mon')
+            hour = weekly_report_config.get('hour', 9)
+            minute = weekly_report_config.get('minute', 0)
+
+            self.scheduler.add_job(
+                func=lambda: generate_weekly_report(self.config_path),
+                trigger='cron',
+                day_of_week=day_of_week,
+                hour=hour,
+                minute=minute,
+                id='weekly_report',
+                name='周报',
+                replace_existing=True
+            )
+            logger.info(f"已注册任务: 周报 (每周{day_of_week} {hour:02d}:{minute:02d})")
+
+        # 8. 月报任务 (每月1号早上 9:00)
+        monthly_report_config = scheduler_config.get('monthly_report', {})
+        if monthly_report_config.get('enabled', False):
+            day = monthly_report_config.get('day', 1)
+            hour = monthly_report_config.get('hour', 9)
+            minute = monthly_report_config.get('minute', 0)
+
+            self.scheduler.add_job(
+                func=lambda: generate_monthly_report(self.config_path),
+                trigger='cron',
+                day=day,
+                hour=hour,
+                minute=minute,
+                id='monthly_report',
+                name='月报',
+                replace_existing=True
+            )
+            logger.info(f"已注册任务: 月报 (每月{day}号 {hour:02d}:{minute:02d})")
+
+        # 9. 净值里程碑检查任务 (每天快照后10分钟检查)
+        milestone_config = scheduler_config.get('milestone_alert', {})
+        if milestone_config.get('enabled', False):
+            hour = milestone_config.get('hour', 0)
+            minute = milestone_config.get('minute', 10)
+
+            self.scheduler.add_job(
+                func=lambda: check_milestones(self.config_path),
+                trigger='cron',
+                hour=hour,
+                minute=minute,
+                id='milestone_alert',
+                name='净值里程碑检查',
+                replace_existing=True
+            )
+            logger.info(f"已注册任务: 净值里程碑检查 (每天 {hour:02d}:{minute:02d})")
+
+        # 10. 持仓周期提醒任务 (每天早上 10:00)
+        holding_period_config = scheduler_config.get('holding_period_reminder', {})
+        if holding_period_config.get('enabled', False):
+            hour = holding_period_config.get('hour', 10)
+            minute = holding_period_config.get('minute', 0)
+
+            self.scheduler.add_job(
+                func=lambda: check_holding_periods(self.config_path),
+                trigger='cron',
+                hour=hour,
+                minute=minute,
+                id='holding_period_reminder',
+                name='持仓周期提醒',
+                replace_existing=True
+            )
+            logger.info(f"已注册任务: 持仓周期提醒 (每天 {hour:02d}:{minute:02d})")
+
+        # 11. 同步错误汇总任务 (每天晚上 23:00)
+        error_summary_config = scheduler_config.get('error_summary', {})
+        if error_summary_config.get('enabled', False):
+            hour = error_summary_config.get('hour', 23)
+            minute = error_summary_config.get('minute', 0)
+
+            self.scheduler.add_job(
+                func=lambda: generate_error_summary(self.config_path),
+                trigger='cron',
+                hour=hour,
+                minute=minute,
+                id='error_summary',
+                name='同步错误汇总',
+                replace_existing=True
+            )
+            logger.info(f"已注册任务: 同步错误汇总 (每天 {hour:02d}:{minute:02d})")
+
+        # 12. 数据库备份任务 (每天凌晨 1点)
         db_config = asset_sync.get('database', {})
         backup_config = db_config.get('backup', {})
         if backup_config.get('enabled', False):
@@ -288,7 +417,8 @@ def main():
     )
     parser.add_argument(
         '--task',
-        choices=['crypto', 'fund', 'snapshot', 'distribution'],
+        choices=['crypto', 'fund', 'snapshot', 'distribution', 'report', 'alert',
+                 'weekly', 'monthly', 'milestone', 'holding', 'summary'],
         help='只运行指定任务一次'
     )
 
@@ -308,6 +438,20 @@ def main():
                 result = create_daily_snapshot(args.config)
             elif args.task == 'distribution':
                 result = sync_asset_distribution(args.config)
+            elif args.task == 'report':
+                result = send_daily_report(args.config)
+            elif args.task == 'alert':
+                result = check_price_alerts(args.config)
+            elif args.task == 'weekly':
+                result = generate_weekly_report(args.config)
+            elif args.task == 'monthly':
+                result = generate_monthly_report(args.config)
+            elif args.task == 'milestone':
+                result = check_milestones(args.config)
+            elif args.task == 'holding':
+                result = check_holding_periods(args.config)
+            elif args.task == 'summary':
+                result = generate_error_summary(args.config)
             logger.info(f"任务结果: {result}")
         else:
             logger.info("执行所有任务一次...")

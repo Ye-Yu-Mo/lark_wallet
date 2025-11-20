@@ -21,6 +21,7 @@ from core.logger import setup_logger
 from schedulers.crypto_sync import sync_crypto
 from schedulers.fund_sync import sync_fund
 from schedulers.snapshot import create_daily_snapshot
+from schedulers.asset_distribution_sync import sync_asset_distribution
 from utils.backup import create_backup
 from utils.alert import AlertManager
 
@@ -130,7 +131,24 @@ class AssetSyncService:
             )
             logger.info(f"已注册任务: 每日快照 (每天 {hour:02d}:{minute:02d})")
 
-        # 4. 数据库备份任务 (每天凌晨 1点)
+        # 4. 资产分布同步任务 (快照后5分钟)
+        distribution_config = scheduler_config.get('distribution_sync', {})
+        if distribution_config.get('enabled', False):
+            hour = distribution_config.get('hour', 0)
+            minute = distribution_config.get('minute', 5)
+
+            self.scheduler.add_job(
+                func=lambda: sync_asset_distribution(self.config_path),
+                trigger='cron',
+                hour=hour,
+                minute=minute,
+                id='distribution_sync',
+                name='资产分布同步',
+                replace_existing=True
+            )
+            logger.info(f"已注册任务: 资产分布同步 (每天 {hour:02d}:{minute:02d})")
+
+        # 5. 数据库备份任务 (每天凌晨 1点)
         db_config = asset_sync.get('database', {})
         backup_config = db_config.get('backup', {})
         if backup_config.get('enabled', False):
@@ -270,7 +288,7 @@ def main():
     )
     parser.add_argument(
         '--task',
-        choices=['crypto', 'fund', 'snapshot'],
+        choices=['crypto', 'fund', 'snapshot', 'distribution'],
         help='只运行指定任务一次'
     )
 
@@ -288,6 +306,8 @@ def main():
                 result = sync_fund(args.config)
             elif args.task == 'snapshot':
                 result = create_daily_snapshot(args.config)
+            elif args.task == 'distribution':
+                result = sync_asset_distribution(args.config)
             logger.info(f"任务结果: {result}")
         else:
             logger.info("执行所有任务一次...")

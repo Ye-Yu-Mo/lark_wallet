@@ -135,7 +135,7 @@ class SnapshotTask:
                     '备注': f"自动快照 - {len(snapshot_records)}个资产"
                 }
 
-                self.feishu.add_snapshot(snapshot_data)
+                self.feishu.create_snapshot(snapshot_data)
                 logger.info(f"快照已保存到飞书历史表")
 
             except Exception as e:

@@ -1,0 +1,160 @@
+"""
+飞书API直接调用客户端
+用于批量操作
+"""
+import requests
+import json
+import time
+
+
+class FeishuClient:
+    """飞书API客户端"""
+
+    def __init__(self, app_id, app_secret):
+        """
+        初始化客户端
+        :param app_id: 应用ID
+        :param app_secret: 应用密钥
+        """
+        self.app_id = app_id
+        self.app_secret = app_secret
+        self.access_token = None
+        self.token_expire_time = 0  # Token过期时间戳
+
+    def get_tenant_access_token(self):
+        """获取tenant_access_token,带过期检查和自动刷新"""
+        # 检查token是否存在且未过期 (提前5分钟刷新)
+        current_time = time.time()
+        if self.access_token and current_time < (self.token_expire_time - 300):
+            return self.access_token
+
+        url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+        headers = {"Content-Type": "application/json"}
+        data = {
+            "app_id": self.app_id,
+            "app_secret": self.app_secret
+        }
+
+        response = requests.post(url, headers=headers, json=data)
+        result = response.json()
+
+        if result.get("code") != 0:
+            raise Exception(f"获取access_token失败: {result}")
+
+        self.access_token = result["tenant_access_token"]
+        # 飞书token有效期默认2小时(7200秒)
+        expire_seconds = result.get("expire", 7200)
+        self.token_expire_time = current_time + expire_seconds
+
+        return self.access_token
+
+    def _api_call_with_retry(self, url, headers, data, max_retries=3, timeout=30):
+        """
+        带重试的API调用
+        :param url: API URL
+        :param headers: 请求头
+        :param data: 请求体
+        :param max_retries: 最大重试次数
+        :param timeout: 超时时间
+        :return: API响应结果
+        """
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(url, headers=headers, json=data, timeout=timeout)
+                result = response.json()
+
+                # 检查是否需要重试
+                code = result.get("code", 0)
+
+                # 成功
+                if code == 0:
+                    return result
+
+                # 限流错误,需要重试
+                if code in [99991400, 99991664]:  # 飞书限流错误码
+                    if attempt < max_retries - 1:
+                        wait_time = (2 ** attempt)  # 指数退避: 1s, 2s, 4s
+                        time.sleep(wait_time)
+                        continue
+
+                # 其他错误,不重试
+                return result
+
+            except requests.exceptions.Timeout:
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt)
+                    time.sleep(wait_time)
+                    continue
+                raise
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    wait_time = (2 ** attempt)
+                    time.sleep(wait_time)
+                    continue
+                raise
+
+        # 所有重试都失败
+        raise Exception(f"API调用失败,已重试{max_retries}次")
+
+    def batch_create_records(self, app_token, table_id, records):
+        """
+        批量创建记录
+        :param app_token: 多维表app_token
+        :param table_id: 表table_id
+        :param records: 记录列表,每条记录格式: {"fields": {...}}
+        :return: 创建结果 {"success": int, "failed": int, "errors": list}
+        """
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_create"
+
+        headers = {
+            "Authorization": f"Bearer {self.get_tenant_access_token()}",
+            "Content-Type": "application/json"
+        }
+
+        data = {
+            "records": records
+        }
+
+        try:
+            # 使用带重试的API调用
+            result = self._api_call_with_retry(url, headers, data)
+
+            if result.get("code") != 0:
+                # 如果批量创建失败,尝试逐条创建
+                return self._fallback_single_create(app_token, table_id, records)
+
+            return {"success": len(records), "failed": 0, "errors": []}
+
+        except Exception as e:
+            # 网络错误等,尝试逐条创建
+            return self._fallback_single_create(app_token, table_id, records)
+
+    def _fallback_single_create(self, app_token, table_id, records):
+        """
+        逐条创建记录(批量失败时的fallback)
+        """
+        success = 0
+        failed = 0
+        errors = []
+
+        for i, record in enumerate(records):
+            try:
+                url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+                headers = {
+                    "Authorization": f"Bearer {self.get_tenant_access_token()}",
+                    "Content-Type": "application/json"
+                }
+
+                # 单条创建也使用重试机制
+                result = self._api_call_with_retry(url, headers, {"fields": record["fields"]}, max_retries=2, timeout=10)
+
+                if result.get("code") == 0:
+                    success += 1
+                else:
+                    failed += 1
+                    errors.append(f"记录{i}: {result.get('msg', 'unknown error')}")
+            except Exception as e:
+                failed += 1
+                errors.append(f"记录{i}: {str(e)}")
+
+        return {"success": success, "failed": failed, "errors": errors}

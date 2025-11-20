@@ -20,51 +20,66 @@ class AssetDiscovery:
     @staticmethod
     def discover_crypto_assets(
         binance: BinanceClient,
-        ignore_patterns: List[str] = None
+        ignore_patterns: List[str] = None,
+        feishu_holdings: List[Dict] = None
     ) -> List[Dict]:
         """
-        从 Binance 自动发现加密货币资产
+        从飞书持仓表和Binance自动发现加密货币资产
+
+        优先级：
+        1. 从飞书持仓表读取已有加密货币（包含成本价）
+        2. 从Binance余额补充新资产
 
         :param binance: Binance 客户端
         :param ignore_patterns: 忽略规则列表 (支持通配符)
-                               示例: ['*USDT', 'BNB', 'BUSD*']
+        :param feishu_holdings: 飞书持仓数据
         :return: 资产列表
         """
         ignore_patterns = ignore_patterns or []
 
         logger.info("开始自动发现加密货币资产...")
 
+        discovered = {}  # 用字典去重，key是symbol
+
         try:
-            # 获取所有余额
+            # 只从Binance获取加密货币资产 (不从飞书读取)
             all_balances = binance.get_all_balances()
 
             if not all_balances:
-                logger.warning("未发现任何加密货币持仓")
-                return []
+                logger.warning("Binance未发现任何余额")
+            else:
+                logger.info(f"从Binance发现 {len(all_balances)} 个资产余额")
+                ignored_count = 0
 
-            logger.info(f"发现 {len(all_balances)} 个加密货币资产")
+                for symbol, balance in all_balances.items():
+                    # 处理 LD* 前缀 (Liquid Swap 代币)
+                    # LDUSDT -> USDT, LDETH -> ETH
+                    base_symbol = symbol
+                    trading_symbol = symbol
+                    if symbol.startswith('LD'):
+                        base_symbol = symbol[2:]  # 去掉LD前缀
+                        trading_symbol = base_symbol
+                        logger.debug(f"检测到Liquid Swap资产: {symbol} -> {base_symbol}")
 
-            # 过滤资产
-            assets = []
-            ignored_count = 0
+                    # 检查是否匹配 ignore 规则
+                    if AssetDiscovery._should_ignore(symbol, ignore_patterns):
+                        logger.debug(f"忽略资产: {symbol} (匹配规则)")
+                        ignored_count += 1
+                        continue
 
-            for symbol, balance in all_balances.items():
-                # 检查是否匹配 ignore 规则
-                if AssetDiscovery._should_ignore(symbol, ignore_patterns):
-                    logger.debug(f"忽略资产: {symbol} (匹配规则)")
-                    ignored_count += 1
-                    continue
+                    # 新发现的资产
+                    discovered[symbol] = {
+                        'symbol': symbol,  # 保留原始代码 (LDUSDT)
+                        'trading_pair': f"{trading_symbol}/USDT",  # 用基础币种获取价格 (USDT/USDT)
+                        'name': symbol,
+                        'quantity': balance,
+                        'avg_cost': 0  # 需要在飞书手动填写成本价
+                    }
 
-                # 构建资产配置
-                assets.append({
-                    'symbol': symbol,
-                    'trading_pair': f"{symbol}/USDT",
-                    'name': symbol,
-                    'quantity': balance,
-                    'avg_cost': 0  # 成本需要从飞书或手动配置获取
-                })
+                logger.info(f"Binance资产处理: 有效 {len(all_balances) - ignored_count} 个, 忽略 {ignored_count} 个")
 
-            logger.info(f"加密货币资产发现完成: 有效 {len(assets)} 个, 忽略 {ignored_count} 个")
+            assets = list(discovered.values())
+            logger.info(f"加密货币资产发现完成: 共 {len(assets)} 个")
 
             return assets
 
@@ -76,65 +91,89 @@ class AssetDiscovery:
     def discover_fund_assets(
         xueqiu: XueqiuClient,
         ignore_patterns: List[str] = None,
-        holdings_data: List[Dict] = None
+        feishu_holdings: List[Dict] = None
     ) -> List[Dict]:
         """
-        从雪球/飞书自动发现基金资产
+        从飞书持仓表和雪球自选股发现基金资产
 
-        注意: 雪球 API 不直接支持获取持仓列表,
-        需要从飞书持仓表读取已有基金列表
+        优先级：
+        1. 从飞书持仓表读取已有基金（最可靠）
+        2. 从雪球自选股补充新基金（可选）
 
         :param xueqiu: 雪球客户端
         :param ignore_patterns: 忽略规则列表
-        :param holdings_data: 从飞书读取的持仓数据
+        :param feishu_holdings: 飞书持仓数据
         :return: 资产列表
         """
         ignore_patterns = ignore_patterns or []
 
         logger.info("开始自动发现基金资产...")
 
+        discovered = {}  # 用字典去重，key是symbol
+
         try:
-            if not holdings_data:
-                logger.warning("未提供持仓数据,无法发现基金资产")
-                logger.info("提示: 基金资产需要从飞书持仓表读取")
-                return []
+            # 1. 优先从飞书持仓表读取
+            if feishu_holdings:
+                fund_holdings = [
+                    h for h in feishu_holdings
+                    if h.get('fields', {}).get('资产类型') == '基金'
+                ]
 
-            # 过滤基金类型的资产
-            fund_holdings = [
-                h for h in holdings_data
-                if h.get('资产类型') == '基金'
-            ]
+                if fund_holdings:
+                    logger.info(f"从飞书持仓表发现 {len(fund_holdings)} 个基金")
+                    for holding in fund_holdings:
+                        fields = holding.get('fields', {})
 
-            if not fund_holdings:
-                logger.warning("飞书持仓表中未发现基金资产")
-                return []
+                        # 解析资产代码 (可能是富文本格式)
+                        symbol_field = fields.get('资产代码')
+                        symbol = None
+                        if isinstance(symbol_field, list) and len(symbol_field) > 0:
+                            # 富文本格式: [{"text":"161119","type":"text"}]
+                            symbol = symbol_field[0].get('text')
+                        elif isinstance(symbol_field, str):
+                            # 纯文本格式
+                            symbol = symbol_field
 
-            logger.info(f"从飞书发现 {len(fund_holdings)} 只基金")
+                        if not symbol:
+                            continue
 
-            # 过滤资产
-            assets = []
-            ignored_count = 0
+                        # 检查是否匹配 ignore 规则
+                        if AssetDiscovery._should_ignore(symbol, ignore_patterns):
+                            logger.debug(f"忽略基金: {symbol} (匹配规则)")
+                            continue
 
-            for holding in fund_holdings:
-                symbol = holding.get('资产代码')
-                if not symbol:
-                    continue
+                        discovered[symbol] = {
+                            'symbol': symbol,
+                            'name': fields.get('资产名称', symbol),
+                            'shares': fields.get('持仓数量', 0) or fields.get('数量', 0),
+                            'avg_cost': fields.get('成本价', 0)
+                        }
 
-                # 检查是否匹配 ignore 规则
-                if AssetDiscovery._should_ignore(symbol, ignore_patterns):
-                    logger.debug(f"忽略基金: {symbol} (匹配规则)")
-                    ignored_count += 1
-                    continue
+            # 2. 从雪球自选股补充
+            watch_list = xueqiu.get_watch_list()
+            if watch_list:
+                logger.info(f"从雪球自选股发现 {len(watch_list)} 个资产")
+                for item in watch_list:
+                    symbol = item.get('symbol')
+                    if not symbol or symbol in discovered:
+                        continue
 
-                # 构建资产配置
-                assets.append({
-                    'symbol': symbol,
-                    'name': holding.get('资产名称', symbol),
-                    'shares': holding.get('数量', 0),
-                    'avg_cost': holding.get('成本价', 0)
-                })
+                    # 检查是否匹配 ignore 规则
+                    if AssetDiscovery._should_ignore(symbol, ignore_patterns):
+                        logger.debug(f"忽略资产: {symbol} (匹配规则)")
+                        continue
 
-            logger.info(f"基金资产发现完成: 有效 {len(assets)} 个, 忽略 {ignored_count} 个")
+                    # 补充新发现的资产
+                    discovered[symbol] = {
+                        'symbol': symbol,
+                        'name': item.get('name', symbol),
+                        'shares': 0,  # 需要手动在飞书填写
+                        'avg_cost': 0,  # 需要手动在飞书填写
+                        'asset_type': item.get('type', 'unknown')
+                    }
+
+            assets = list(discovered.values())
+            logger.info(f"基金资产发现完成: 共 {len(assets)} 个")
 
             return assets
 
@@ -180,16 +219,18 @@ class AssetDiscovery:
 
 def get_crypto_assets(
     binance: BinanceClient,
-    config: Dict
+    config: Dict,
+    feishu_holdings: List[Dict] = None
 ) -> List[Dict]:
     """
     获取加密货币资产列表
 
-    如果启用 auto_discover,自动从 Binance 获取;
+    如果启用 auto_discover,从飞书和Binance获取;
     否则返回手动配置的列表
 
     :param binance: Binance 客户端
     :param config: 资产配置
+    :param feishu_holdings: 飞书持仓数据
     :return: 资产列表
     """
     # 兼容旧格式 (数组)
@@ -201,7 +242,7 @@ def get_crypto_assets(
 
     if auto_discover:
         ignore_patterns = config.get('ignore', [])
-        return AssetDiscovery.discover_crypto_assets(binance, ignore_patterns)
+        return AssetDiscovery.discover_crypto_assets(binance, ignore_patterns, feishu_holdings)
     else:
         # 手动配置模式
         return config.get('manual', [])
@@ -210,17 +251,17 @@ def get_crypto_assets(
 def get_fund_assets(
     xueqiu: XueqiuClient,
     config: Dict,
-    holdings_data: List[Dict] = None
+    feishu_holdings: List[Dict] = None
 ) -> List[Dict]:
     """
     获取基金资产列表
 
-    如果启用 auto_discover,从飞书持仓表读取;
+    如果启用 auto_discover,从飞书持仓表和雪球自选股获取;
     否则返回手动配置的列表
 
     :param xueqiu: 雪球客户端
     :param config: 资产配置
-    :param holdings_data: 飞书持仓数据
+    :param feishu_holdings: 飞书持仓数据
     :return: 资产列表
     """
     # 兼容旧格式 (数组)
@@ -232,7 +273,7 @@ def get_fund_assets(
 
     if auto_discover:
         ignore_patterns = config.get('ignore', [])
-        return AssetDiscovery.discover_fund_assets(xueqiu, ignore_patterns, holdings_data)
+        return AssetDiscovery.discover_fund_assets(xueqiu, ignore_patterns, feishu_holdings)
     else:
         # 手动配置模式
         return config.get('manual', [])

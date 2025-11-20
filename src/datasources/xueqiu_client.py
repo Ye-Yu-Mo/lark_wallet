@@ -43,18 +43,32 @@ class XueqiuClient(DataSource):
         获取当前价格（基金净值或股票价格）
 
         :param symbol: 资产代码 (基金代码或股票代码)
-                      基金示例: '000001' (华夏成长)
+                      基金示例: '161119' (易方达中债)
                       股票示例: 'SH600519' (贵州茅台)
         :return: 当前价格/净值，失败返回 None
         """
         try:
-            # 使用 pysnowball 0.1.8 API
+            # 优先尝试fund_info(适用于场外基金)
+            try:
+                fund_result = self.ball.fund_info(symbol)
+                if fund_result and 'data' in fund_result:
+                    fund_data = fund_result['data']
+                    fund_derived = fund_data.get('fund_derived', {})
+                    unit_nav = fund_derived.get('unit_nav')  # 单位净值
+                    if unit_nav:
+                        return float(unit_nav)
+            except:
+                pass
+
+            # 如果fund_info失败，尝试quotec(适用于场内股票/ETF)
             result = self.ball.quotec(symbol)
 
             if result and 'data' in result and len(result['data']) > 0:
                 quote_data = result['data'][0]  # data 是数组,取第一个元素
                 # 尝试获取当前价格
-                return quote_data.get('current') or quote_data.get('close')
+                price = quote_data.get('current') or quote_data.get('close')
+                if price:
+                    return price
 
             return None
 
@@ -134,7 +148,29 @@ class XueqiuClient(DataSource):
         :return: 基金信息字典
         """
         try:
-            # 使用 pysnowball 0.1.8 API
+            # 优先使用fund_info API(适用于场外基金)
+            fund_result = self.ball.fund_info(symbol)
+            if fund_result and 'data' in fund_result:
+                fund_data = fund_result['data']
+                fund_derived = fund_data.get('fund_derived', {})
+
+                return {
+                    'symbol': symbol,
+                    'name': fund_data.get('fd_name'),
+                    'current': float(fund_derived.get('unit_nav', 0)),  # 单位净值
+                    'percent': float(fund_derived.get('nav_grtd', 0)),  # 日涨跌
+                    'chg': 0,
+                    'high': 0,
+                    'low': 0,
+                    'open': 0,
+                    'last_close': 0,
+                    'volume': 0,
+                    'amount': 0,
+                    'market_capital': 0,
+                    'timestamp': 0
+                }
+
+            # fallback到quotec API(适用于场内股票/ETF)
             result = self.ball.quote_detail(symbol)
 
             if not result or 'data' not in result:
@@ -256,6 +292,68 @@ class XueqiuClient(DataSource):
 
         except Exception as e:
             print(f"获取详细信息失败 ({symbol}): {e}")
+            return None
+
+    def get_watch_list(self) -> List[Dict]:
+        """
+        获取用户自选股列表
+
+        :return: 自选股列表
+        """
+        try:
+            # 使用 pysnowball API 获取自选股
+            result = self.ball.watch_list()
+
+            if not result or 'stocks' not in result:
+                return []
+
+            stocks = result['stocks']
+            if not stocks:
+                return []
+
+            # 转换为标准格式
+            watch_list = []
+            for stock in stocks:
+                watch_list.append({
+                    'symbol': stock.get('symbol'),  # 如 SH510300
+                    'name': stock.get('name'),
+                    'current': stock.get('current', 0),  # 当前价格
+                    'percent': stock.get('percent', 0),  # 涨跌幅
+                    'type': stock.get('type'),  # 类型 (如 fund)
+                })
+
+            return watch_list
+
+        except Exception as e:
+            print(f"获取自选股列表失败: {e}")
+            return []
+
+    def get_portfolio_info(self, cube_id: str) -> Optional[Dict]:
+        """
+        获取雪球组合基本信息
+
+        :param cube_id: 组合ID
+        :return: 组合信息
+        """
+        try:
+            result = self.ball.quote_current(cube_id)
+
+            if not result or 'cube' not in result:
+                return None
+
+            cube = result['cube']
+            return {
+                'id': cube.get('id'),
+                'symbol': cube.get('symbol'),
+                'name': cube.get('name'),
+                'net_value': cube.get('net_value'),  # 组合净值
+                'total_gain': cube.get('total_gain'),  # 总收益
+                'daily_gain': cube.get('daily_gain'),  # 日收益
+                'updated_at': cube.get('updated_at')
+            }
+
+        except Exception as e:
+            print(f"获取组合信息失败 ({cube_id}): {e}")
             return None
 
     def test_connectivity(self) -> bool:

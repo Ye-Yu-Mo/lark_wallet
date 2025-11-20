@@ -78,21 +78,22 @@ class FundSyncTask:
             logger.info("今天不是交易日,跳过基金同步")
             return result
 
-        # 获取飞书持仓数据 (用于自动发现基金)
-        holdings_data = None
+        # 从飞书读取持仓数据 (用于资产发现和数据补充)
+        holdings_data = []
         try:
-            # 从飞书读取所有持仓
             holdings_data = self.feishu.get_all_holdings()
+            logger.info(f"从飞书读取到 {len(holdings_data)} 个持仓记录")
         except Exception as e:
             logger.warning(f"从飞书读取持仓失败: {e}")
 
-        # 自动发现或获取配置的基金列表
+        # 自动发现或获取配置的基金列表 (传入飞书持仓数据)
         fund_list = get_fund_assets(self.xueqiu, self.fund_config, holdings_data)
 
         if not fund_list:
             logger.warning("基金列表为空,跳过同步")
             return result
 
+        # 飞书持仓数据已经包含在fund_list中，无需再次合并
         result['total'] = len(fund_list)
         logger.info(f"开始同步基金, 共 {len(fund_list)} 只基金")
 
@@ -162,14 +163,17 @@ class FundSyncTask:
             logger.error(f"获取净值失败: {symbol}")
             return False
 
-        # 2. 获取基金详细信息
+        # 2. 获取基金详细信息 (自动获取资产名称)
         fund_info = self.xueqiu.get_fund_info(symbol)
         fund_name = fund_config.get('name', symbol)
         volume = None
+        change_percent = 0
 
         if fund_info:
+            # 从API自动获取资产名称
             fund_name = fund_info.get('name', fund_name)
             volume = fund_info.get('volume')
+            change_percent = fund_info.get('percent', 0)
 
         # 3. 保存价格到 SQLite
         try:
@@ -201,27 +205,25 @@ class FundSyncTask:
         profit = current_value - cost_value
         profit_percent = (profit / cost_value * 100) if cost_value > 0 else 0
 
-        # 6. 获取涨跌幅
-        change_percent = 0
-        if fund_info:
-            change_percent = fund_info.get('percent', 0)
-
-        # 7. 更新飞书持仓表
+        # 6. 更新飞书持仓表
         try:
+            # 确保基金名称是纯字符串
+            if isinstance(fund_name, list):
+                fund_name = fund_name[0].get('text') if len(fund_name) > 0 else symbol
+
             feishu_data = {
-                '资产名称': fund_name,
+                '资产名称': str(fund_name),  # 确保是字符串
                 '资产类型': '基金',
-                '数量': shares,
+                '持仓数量': shares,
                 '当前价格': nav,
-                '当前市值': current_value,
-                '成本价': avg_cost,
-                '总成本': cost_value,
-                '收益': profit,
-                '收益率': profit_percent,
-                '日涨跌': change_percent,
-                '数据来源': 'xueqiu',
-                '更新时间': int(datetime.now().timestamp() * 1000)
+                '数据源': 'xueqiu',
+                '更新状态': '成功',
+                '最后更新时间': int(datetime.now().timestamp() * 1000)
             }
+
+            # 只在成本价存在时才更新 (保留用户首次填写的成本价)
+            if avg_cost > 0:
+                feishu_data['单位成本'] = avg_cost
 
             self.feishu.update_holding(symbol, feishu_data)
             logger.debug(f"更新飞书成功: {symbol}, 净值: {nav}, 市值: {current_value}")

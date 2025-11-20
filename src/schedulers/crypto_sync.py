@@ -85,8 +85,16 @@ class CryptoSyncTask:
             'errors': []
         }
 
-        # 自动发现或获取配置的资产列表
-        crypto_list = get_crypto_assets(self.binance, self.crypto_config)
+        # 从飞书读取持仓数据 (用于资产发现和数据补充)
+        holdings_data = []
+        try:
+            holdings_data = self.feishu.get_all_holdings()
+            logger.info(f"从飞书读取到 {len(holdings_data)} 个持仓记录")
+        except Exception as e:
+            logger.warning(f"从飞书读取持仓失败: {e}")
+
+        # 自动发现或获取配置的资产列表 (传入飞书持仓数据)
+        crypto_list = get_crypto_assets(self.binance, self.crypto_config, holdings_data)
 
         if not crypto_list:
             logger.warning("加密货币列表为空,跳过同步")
@@ -195,10 +203,16 @@ class CryptoSyncTask:
         logger.debug(f"同步资产: {symbol}")
 
         # 1. 获取当前价格
-        price = self.binance.get_price(trading_pair)
-        if price is None:
-            logger.error(f"获取价格失败: {trading_pair}")
-            return False
+        # 特殊处理稳定币 (USDT/USDC/BUSD 等)
+        base_symbol = symbol[2:] if symbol.startswith('LD') else symbol
+        if base_symbol in ['USDT', 'USDC', 'BUSD', 'TUSD', 'USDP']:
+            price = 1.0  # 稳定币固定为 1.0
+            logger.debug(f"稳定币 {symbol} 使用固定价格 1.0")
+        else:
+            price = self.binance.get_price(trading_pair)
+            if price is None:
+                logger.error(f"获取价格失败: {trading_pair}")
+                return False
 
         # 2. 获取交易量 (可选)
         volume = None
@@ -251,19 +265,24 @@ class CryptoSyncTask:
 
         # 7. 更新飞书持仓表
         try:
+            # 确保资产名称是纯字符串
+            asset_name = asset_config.get('name', symbol)
+            if isinstance(asset_name, list):
+                asset_name = asset_name[0].get('text') if len(asset_name) > 0 else symbol
+
             feishu_data = {
-                '资产名称': asset_config.get('name', symbol),
+                '资产名称': str(asset_name),  # 确保是字符串
                 '资产类型': '加密货币',
-                '数量': final_quantity,
+                '持仓数量': final_quantity,
                 '当前价格': price,
-                '当前市值': current_value,
-                '成本价': avg_cost,
-                '总成本': cost_value,
-                '收益': profit,
-                '收益率': profit_percent,
-                '数据来源': 'binance',
-                '更新时间': int(datetime.now().timestamp() * 1000)
+                '数据源': 'binance',
+                '更新状态': '成功',
+                '最后更新时间': int(datetime.now().timestamp() * 1000)
             }
+
+            # 只在成本价存在时才更新
+            if avg_cost > 0:
+                feishu_data['单位成本'] = avg_cost
 
             self.feishu.update_holding(symbol, feishu_data)
             logger.debug(f"更新飞书成功: {symbol}, 价格: {price}, 市值: {current_value}")

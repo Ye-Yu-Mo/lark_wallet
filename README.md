@@ -1,393 +1,250 @@
-# 资产同步系统
+# 飞书财务管理工具集
 
-自动化资产同步系统，定时从 Binance (加密货币) 和雪球 (基金) 获取价格和持仓数据，同步到 SQLite 和飞书多维表格。
+两个独立的财务管理工具:
+1. **账单导入工具** - 自动解析支付宝/微信账单并导入飞书多维表格
+2. **资产同步系统** - 定时从 Binance/雪球获取资产数据并同步到飞书
 
-## 快速开始
+---
 
-### 1. 安装依赖
+## 工具1: 账单导入工具
+
+### 功能
+
+批量导入支付宝和微信账单到飞书多维表格。
+
+**核心特性**:
+- 自动解析账单 (支付宝CSV / 微信XLSX)
+- 智能分类 (基于交易对方和关键词)
+- 增量导入 (只导入新记录)
+- 批量处理 (500条/批次)
+- 去重机制
+
+### 快速开始
+
+#### 1. 安装依赖
 
 ```bash
-# 使用 uv 管理环境
 uv sync
 ```
 
-### 2. 配置
+#### 2. 配置
 
-编辑 `config.json`，配置以下信息：
+编辑 `config.json`:
 
-- **飞书应用凭证**: `mcp_server.app_id` 和 `app_secret`
-- **飞书表格**: `asset_sync.feishu.app_token` 和 `tables`
-- **Binance API**: `asset_sync.binance.api_key` 和 `api_secret`
-- **雪球 Cookies**: `asset_sync.xueqiu.cookies`
-- **飞书机器人**: `asset_sync.alerts.feishu_webhook`
-
-### 3. 初始化数据库
-
-```bash
-python setup_tables.py
-```
-
-### 4. 运行
-
-```bash
-# 测试运行 (一次性执行所有任务)
-./main.py --run-once
-
-# 启动定时服务
-./main.py
-```
-
----
-
-## 系统架构
-
-### 工作流程
-
-```mermaid
-flowchart TB
-    subgraph "数据源"
-        A1[Binance API]
-        A2[雪球 API]
-    end
-
-    subgraph "资产发现"
-        B1[获取所有余额]
-        B2[读取飞书持仓表]
-        B3[应用 ignore 规则]
-    end
-
-    subgraph "同步任务"
-        C1[加密货币同步<br/>每小时整点]
-        C2[基金同步<br/>每天 9:00]
-        C3[每日快照<br/>每天 0:00]
-        C4[数据库备份<br/>每天 1:00]
-    end
-
-    subgraph "数据存储"
-        D1[(SQLite<br/>本地高性能存储)]
-        D2[飞书持仓表<br/>实时市值]
-        D3[飞书历史表<br/>每日快照]
-        D4[飞书日志表<br/>同步记录]
-    end
-
-    subgraph "监控告警"
-        E1[飞书机器人]
-        E2[同步失败告警]
-        E3[备份失败告警]
-    end
-
-    A1 --> B1
-    A2 --> B2
-    B1 --> B3
-    B2 --> B3
-
-    B3 --> C1
-    B3 --> C2
-
-    C1 --> D1
-    C1 --> D2
-    C2 --> D1
-    C2 --> D2
-
-    D1 --> C3
-    C3 --> D3
-
-    D1 --> C4
-
-    C1 -.失败.-> E2
-    C2 -.失败.-> E2
-    C4 -.失败.-> E3
-
-    E2 --> E1
-    E3 --> E1
-
-    style C1 fill:#e1f5ff
-    style C2 fill:#e1f5ff
-    style C3 fill:#fff4e1
-    style C4 fill:#ffe1e1
-    style E1 fill:#f0f0f0
-```
-
-### 数据流
-
-```mermaid
-sequenceDiagram
-    participant T as 定时任务
-    participant DS as 数据源<br/>(Binance/雪球)
-    participant AD as 资产发现
-    participant DB as SQLite
-    participant FS as 飞书
-    participant Alert as 告警
-
-    Note over T: 每小时/每天触发
-
-    T->>AD: 1. 发现资产
-    AD->>DS: 2. 获取所有资产
-    DS-->>AD: 返回资产列表
-    AD->>AD: 3. 应用 ignore 规则
-
-    loop 遍历每个资产
-        T->>DS: 4. 获取价格
-        DS-->>T: 返回价格
-        T->>DS: 5. 获取持仓
-        DS-->>T: 返回持仓
-        T->>DB: 6. 保存价格历史
-        T->>DB: 7. 更新持仓
-        T->>T: 8. 计算收益
-        T->>FS: 9. 更新飞书持仓表
-    end
-
-    T->>FS: 10. 记录同步日志
-
-    alt 同步失败
-        T->>Alert: 11. 发送告警
-        Alert->>FS: 推送到飞书群
-    end
-```
-
----
-
-## 核心功能
-
-### 1. 自动资产发现
-
-**加密货币**:
-- 自动从 Binance 获取所有有余额的资产
-- 支持 ignore 规则过滤 (通配符)
-
-**基金**:
-- 从飞书持仓表读取已有基金
-- 支持 ignore 规则过滤
-
-**Ignore 规则示例**:
 ```json
 {
-  "crypto": {
-    "auto_discover": true,
-    "ignore": ["USDT", "BNB", "*DOWN*", "*UP*"]
+  "accounts": {
+    "jasxu": {
+      "app_token": "P0dsbK6vSa...",
+      "table_id": "tblGlYT4on...",
+      "name": "jasxu的账本",
+      "data_dir": "data",
+      "last_import_timestamp": {
+        "alipay": 0,
+        "wechat": 0
+      }
+    }
+  },
+  "mcp_server": {
+    "app_id": "cli_a997302b31b11013",
+    "app_secret": "xZVA2kUH..."
   }
 }
 ```
 
-- `"USDT"`: 精确匹配，忽略 USDT
-- `"BNB*"`: 前缀匹配，忽略 BNB、BNBUSDT 等
-- `"*USDT"`: 后缀匹配，忽略所有 USDT 交易对
-- `"*DOWN*"`: 中间匹配，忽略所有杠杆代币
+#### 3. 准备账单文件
 
-### 2. 定时同步
+将账单文件放到 `data_dir` 目录:
+- 支付宝账单: `*.csv` (GBK编码)
+- 微信账单: `*.xlsx`
 
-```mermaid
-gantt
-    title 每日同步时间线
-    dateFormat HH:mm
-    axisFormat %H:%M
+支持子目录递归扫描。
 
-    section 每小时
-    加密货币同步 :crit, 00:00, 1h
-    加密货币同步 :crit, 01:00, 1h
-    加密货币同步 :crit, 02:00, 1h
-
-    section 每日任务
-    每日快照 :milestone, 00:00, 0m
-    数据库备份 :01:00, 10m
-    基金同步 :09:00, 10m
-```
-
-| 任务 | 时间 | 频率 | 说明 |
-|------|------|------|------|
-| 加密货币同步 | 每小时整点 | 24次/天 | 获取价格和持仓 |
-| 基金同步 | 每天 9:00 | 1次/天 | 只在交易日执行 |
-| 每日快照 | 每天 0:00 | 1次/天 | 记录总资产 |
-| 数据库备份 | 每天 1:00 | 1次/天 | 自动备份并清理 |
-
-### 3. 双存储架构
-
-```mermaid
-graph LR
-    A[数据源] --> B[同步任务]
-    B --> C[SQLite]
-    B --> D[飞书]
-
-    C --> C1[价格历史<br/>price_history]
-    C --> C2[K线数据<br/>klines]
-    C --> C3[持仓<br/>holdings]
-    C --> C4[订单<br/>orders]
-
-    D --> D1[持仓表<br/>实时市值/收益]
-    D --> D2[历史表<br/>每日快照]
-    D --> D3[日志表<br/>同步记录]
-
-    style C fill:#ffe1e1
-    style D fill:#e1f5ff
-```
-
-**SQLite**: 本地高性能存储
-- 支持快速查询
-- 历史数据分析
-- 离线访问
-
-**飞书**: 云端可视化
-- 多人协作查看
-- 自动计算收益
-- 移动端访问
-
-### 4. 监控告警
-
-```mermaid
-flowchart LR
-    A[同步任务] -->|成功| B[记录日志]
-    A -->|失败| C{判断失败类型}
-
-    C -->|完全失败| D[发送失败告警]
-    C -->|部分失败| E{成功率 < 80%?}
-
-    E -->|是| F[发送部分成功告警]
-    E -->|否| B
-
-    D --> G[飞书群消息]
-    F --> G
-
-    H[数据库备份] -->|失败| I[发送备份失败告警]
-    I --> G
-
-    style D fill:#ff9999
-    style F fill:#ffcc99
-    style G fill:#99ccff
-```
-
-**告警类型**:
-- ❌ 同步完全失败 - 红色告警
-- ⚠️ 同步部分成功 - 橙色警告
-- ❌ 数据库备份失败 - 红色告警
-- ℹ️ 系统启动/停止 - 蓝色通知
-
----
-
-## 使用指南
-
-### 运行模式
+#### 4. 运行导入
 
 ```bash
-# 1. 一次性运行所有任务
-./main.py --run-once
+# 导入所有账本
+python import.py
 
-# 2. 只运行单个任务
-./main.py --task crypto      # 加密货币同步
-./main.py --task fund        # 基金同步
-./main.py --task snapshot    # 每日快照
+# 只导入指定账本
+python import.py --account jasxu
 
-# 3. 启动定时服务 (前台)
-./main.py
-
-# 4. 后台服务 (systemd)
-sudo systemctl start feishu-asset-sync
-sudo systemctl status feishu-asset-sync
+# 使用自定义配置
+python import.py --config my_config.json
 ```
 
-### 查看日志
+### 智能分类
 
-```bash
-# 实时查看日志
-tail -f logs/sync_$(date +%Y%m%d).log
+系统会自动将交易分类为:
 
-# 查看错误
-grep ERROR logs/sync_*.log | tail -20
+| 分类 | 示例关键词 |
+|------|-----------|
+| 餐饮 | 餐厅、外卖、美团、饿了么、咖啡 |
+| 交通 | 滴滴、地铁、加油、停车、高铁 |
+| 购物 | 淘宝、京东、超市、便利店 |
+| 娱乐 | 电影、游戏、健身、KTV |
+| 固定支出 | 水电、物业、房租、话费 |
+| 家用 | 家政、维修、装修 |
+| 医疗 | 医院、药店、体检 |
+| 学习办公 | 教育、培训、书籍、办公用品 |
+| 理发美容 | 理发、美发、美容、美甲 |
+| 家庭支出 | 家人转账 |
+| 红包转账 | 红包、转账、提现 |
+| 贷款 | 花呗、借呗、信用卡 |
 
-# systemd 日志
-journalctl -u feishu-asset-sync -f
+分类规则可在 `lib/smart_categorizer.py` 中自定义。
+
+### 飞书表格结构
+
+目标表格需包含以下字段:
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| 备注 | 文本 | 交易描述 |
+| 日期 | 日期 | 交易时间戳(毫秒) |
+| 收支 | 单选 | "收入" 或 "支出" |
+| 分类 | 单选 | 智能分类结果 |
+| 金额 | 数字 | 交易金额 |
+
+### 工作流程
+
 ```
-
-### 数据库备份
-
-```bash
-# 手动备份
-python -c "from utils.backup import create_backup; create_backup()"
-
-# 查看备份列表
-ls -lht data/backups/
-
-# 从备份恢复
-python -c "
-from utils.backup import DatabaseBackup
-db = DatabaseBackup('data/assets.db')
-db.restore_backup('data/backups/assets_20250120_010000.db')
-"
+1. 扫描data目录 → 找到所有*.csv和*.xlsx
+2. 解析账单文件 → 提取交易记录
+3. 智能分类 → 基于关键词和交易对方
+4. 过滤新记录 → 基于last_import_timestamp
+5. 批量导入 → 500条/批次
+6. 更新时间戳 → 记录最大导入时间
 ```
 
 ---
 
-## 配置说明
+## 工具2: 资产同步系统
 
-### 完整配置示例
+### 功能
+
+定时同步加密货币和基金资产数据。
+
+**核心特性**:
+- 自动资产发现 (Binance余额 / 飞书持仓表)
+- 定时同步 (加密货币每小时 / 基金每天)
+- 双存储 (SQLite本地 + 飞书云端)
+- 每日快照
+- 自动备份
+- 告警通知
+
+### 快速开始
+
+#### 1. 配置
+
+编辑 `config.json` 中的 `asset_sync` 部分:
 
 ```json
 {
   "asset_sync": {
+    "enabled": true,
+    "feishu": {
+      "app_token": "P0dsbK6vSa...",
+      "tables": {
+        "holdings": "tbl持仓表ID",
+        "history": "tbl历史表ID",
+        "logs": "tbl日志表ID"
+      }
+    },
     "binance": {
       "enabled": true,
-      "api_key": "your_api_key",
-      "api_secret": "your_api_secret",
-      "testnet": false
+      "api_key": "YOUR_API_KEY",
+      "api_secret": "YOUR_SECRET"
     },
     "xueqiu": {
       "enabled": true,
-      "cookies": "xq_a_token=xxx;"
-    },
-    "assets": {
-      "crypto": {
-        "auto_discover": true,
-        "ignore": ["USDT", "BNB", "*DOWN*", "*UP*"]
-      },
-      "funds": {
-        "auto_discover": true,
-        "ignore": []
-      }
+      "cookies": "xq_a_token=..."
     },
     "scheduler": {
-      "crypto_sync": {"enabled": true, "hour": "*", "minute": 0},
-      "fund_sync": {"enabled": true, "hour": 9, "minute": 0},
-      "snapshot": {"enabled": true, "hour": 0, "minute": 0}
+      "crypto_sync": {
+        "enabled": true,
+        "hour": "*",
+        "minute": 0
+      },
+      "fund_sync": {
+        "enabled": true,
+        "hour": 9,
+        "minute": 0
+      },
+      "snapshot": {
+        "enabled": true,
+        "hour": 0,
+        "minute": 0
+      }
     },
     "database": {
       "path": "data/assets.db",
       "backup": {
         "enabled": true,
-        "path": "data/backups/",
         "keep_days": 30
       }
     },
     "alerts": {
       "enabled": true,
-      "feishu_webhook": "https://open.feishu.cn/...",
-      "alert_on_failure": true,
-      "alert_on_partial_success": false,
-      "min_success_rate": 0.8
+      "feishu_webhook": "https://open.feishu.cn/..."
     }
   }
 }
 ```
 
-### 关键配置项
+#### 2. 初始化数据库
 
-| 配置项 | 说明 | 建议值 |
-|--------|------|--------|
-| `binance.enabled` | 启用币安同步 | `true` |
-| `xueqiu.enabled` | 启用雪球同步 | `true` |
-| `assets.crypto.auto_discover` | 自动发现资产 | `true` |
-| `assets.crypto.ignore` | 忽略的资产 | `["USDT", "BNB"]` |
-| `scheduler.*.enabled` | 启用定时任务 | `true` |
-| `database.backup.enabled` | 自动备份 | `true` |
-| `database.backup.keep_days` | 备份保留天数 | `30` |
-| `alerts.enabled` | 启用告警 | `true` |
-| `alerts.min_success_rate` | 最低成功率 | `0.8` |
+```bash
+python setup_tables.py
+```
 
----
+#### 3. 运行
 
-## 飞书表格结构
+```bash
+# 测试运行 (一次性)
+./main.py --run-once
 
-### 1. 持仓表 (holdings)
+# 只运行单个任务
+./main.py --task crypto
+./main.py --task fund
+./main.py --task snapshot
 
-实时显示所有资产的当前状态:
+# 启动定时服务
+./main.py
+```
+
+### 系统架构
+
+```
+数据源 (Binance/雪球)
+    ↓
+资产发现 (自动/手动)
+    ↓
+定时任务 (APScheduler)
+    ├─ 加密货币同步 (每小时)
+    ├─ 基金同步 (每天9:00)
+    ├─ 每日快照 (每天0:00)
+    └─ 数据库备份 (每天1:00)
+    ↓
+双存储
+    ├─ SQLite (本地高性能)
+    └─ 飞书 (云端可视化)
+    ↓
+监控告警 (飞书机器人)
+```
+
+### 定时任务
+
+| 任务 | 时间 | 说明 |
+|------|------|------|
+| 加密货币同步 | 每小时整点 | 获取价格和持仓 |
+| 基金同步 | 每天 9:00 | 只在交易日执行 |
+| 每日快照 | 每天 0:00 | 记录总资产 |
+| 数据库备份 | 每天 1:00 | 自动备份并清理 |
+
+### 飞书表格结构
+
+#### 持仓表 (holdings)
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -403,9 +260,7 @@ db.restore_backup('data/backups/assets_20250120_010000.db')
 | 收益率 | 数字 | = 收益 / 总成本 × 100% |
 | 更新时间 | 日期 | 最后更新时间 |
 
-### 2. 历史表 (history)
-
-记录每日资产快照:
+#### 历史表 (history)
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -416,9 +271,7 @@ db.restore_backup('data/backups/assets_20250120_010000.db')
 | 收益率 | 数字 | = 总收益 / 总成本 × 100% |
 | 持仓数量 | 数字 | 资产种类数 |
 
-### 3. 日志表 (logs)
-
-记录所有同步操作:
+#### 日志表 (logs)
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
@@ -430,159 +283,171 @@ db.restore_backup('data/backups/assets_20250120_010000.db')
 | 错误信息 | 文本 | 错误详情 |
 | 耗时 | 数字 | 执行时间 (秒) |
 
----
-
-## 项目结构
-
-```
-feishu-asset-sync/
-├── main.py                     # 主程序入口
-├── setup_tables.py             # 数据库初始化
-├── config.json                 # 配置文件
-├── pyproject.toml              # uv 项目配置
-├── feishu-asset-sync.service   # systemd 服务配置
-│
-├── src/
-│   ├── core/                   # 核心模块
-│   │   ├── config.py          # 配置管理
-│   │   ├── database.py        # SQLite 封装
-│   │   ├── feishu_client.py   # 飞书 API
-│   │   └── logger.py          # 日志系统
-│   │
-│   ├── datasources/           # 数据源
-│   │   ├── base.py           # 抽象基类
-│   │   ├── binance_client.py # 币安数据源
-│   │   └── xueqiu_client.py  # 雪球数据源
-│   │
-│   ├── schedulers/           # 定时任务
-│   │   ├── crypto_sync.py   # 加密货币同步
-│   │   ├── fund_sync.py     # 基金同步
-│   │   └── snapshot.py      # 每日快照
-│   │
-│   └── utils/                # 工具模块
-│       ├── asset_discovery.py # 资产发现
-│       ├── alert.py          # 告警通知
-│       └── backup.py         # 数据库备份
-│
-├── data/
-│   ├── assets.db             # SQLite 数据库
-│   └── backups/              # 数据库备份
-│
-└── logs/                     # 日志文件
-    └── sync_YYYYMMDD.log
-```
-
----
-
-## 常见问题
-
-### 1. 为什么同步失败?
-
-**检查清单**:
-- [ ] 网络是否正常 (能否访问 Binance/雪球)
-- [ ] API Key 是否正确
-- [ ] Cookies 是否过期
-- [ ] 飞书表格是否存在
-- [ ] 查看日志: `tail -f logs/sync_*.log`
-
-### 2. 如何添加新资产?
-
-**自动发现模式** (推荐):
-- 加密货币: 直接在 Binance 购买,系统自动发现
-- 基金: 在飞书持仓表手动添加一条记录
-
-**手动配置模式**:
-```json
-{
-  "assets": {
-    "crypto": {
-      "auto_discover": false,
-      "manual": [
-        {"symbol": "BTC", "quantity": 0.5, "avg_cost": 50000}
-      ]
-    }
-  }
-}
-```
-
-### 3. 如何忽略某些资产?
-
-在 `ignore` 中添加规则:
-```json
-{
-  "crypto": {
-    "ignore": [
-      "USDT",        // 忽略 USDT
-      "BNB*",        // 忽略 BNB 开头
-      "*USDT",       // 忽略 USDT 结尾
-      "*DOWN*"       // 忽略包含 DOWN
-    ]
-  }
-}
-```
-
-### 4. 如何修改同步频率?
-
-编辑 `config.json`:
-```json
-{
-  "scheduler": {
-    "crypto_sync": {
-      "hour": "*",    // 每小时
-      "minute": 0     // 整点
-    },
-    "crypto_sync_15min": {
-      "hour": "*",
-      "minute": "*/15"  // 每15分钟
-    }
-  }
-}
-```
-
-### 5. 备份占用太多空间?
-
-调整保留天数:
-```json
-{
-  "database": {
-    "backup": {
-      "keep_days": 7  // 只保留7天
-    }
-  }
-}
-```
-
----
-
-## 服务器部署
-
-### systemd 配置
-
-1. 编辑服务文件 `feishu-asset-sync.service`
-2. 修改 `User` 和 `WorkingDirectory`
-3. 安装服务:
+### 数据库备份
 
 ```bash
+# 手动备份
+python -c "from src.utils.backup import create_backup; create_backup()"
+
+# 查看备份
+ls -lht data/backups/
+
+# 从备份恢复
+python -c "
+from src.utils.backup import DatabaseBackup
+db = DatabaseBackup('data/assets.db')
+db.restore_backup('data/backups/assets_20250120_010000.db')
+"
+```
+
+### 服务器部署 (systemd)
+
+```bash
+# 编辑服务文件中的User和WorkingDirectory
 sudo cp feishu-asset-sync.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable feishu-asset-sync
 sudo systemctl start feishu-asset-sync
-```
 
-### 管理服务
-
-```bash
 # 查看状态
 sudo systemctl status feishu-asset-sync
 
 # 查看日志
 sudo journalctl -u feishu-asset-sync -f
+```
 
-# 重启服务
-sudo systemctl restart feishu-asset-sync
+---
 
-# 停止服务
-sudo systemctl stop feishu-asset-sync
+## 项目结构
+
+```
+feishu/
+├── import.py                   # 账单导入工具入口
+├── main.py                     # 资产同步系统入口
+├── setup_tables.py             # 数据库初始化
+├── config.json                 # 统一配置文件
+├── pyproject.toml              # uv 项目配置
+│
+├── lib/                        # 账单导入模块
+│   ├── config.py              # 配置管理
+│   ├── feishu_client.py       # 飞书API
+│   ├── bill_parser.py         # 账单解析
+│   ├── smart_categorizer.py   # 智能分类
+│   └── logger.py              # 日志系统
+│
+├── src/                        # 资产同步模块
+│   ├── core/                  # 核心模块
+│   │   ├── config.py
+│   │   ├── database.py
+│   │   ├── feishu_client.py
+│   │   └── logger.py
+│   ├── datasources/           # 数据源
+│   │   ├── binance_client.py
+│   │   └── xueqiu_client.py
+│   ├── schedulers/            # 定时任务
+│   │   ├── crypto_sync.py
+│   │   ├── fund_sync.py
+│   │   └── snapshot.py
+│   └── utils/                 # 工具模块
+│       ├── asset_discovery.py
+│       ├── alert.py
+│       └── backup.py
+│
+├── data/                       # 数据目录
+│   ├── assets.db              # SQLite 数据库
+│   └── backups/               # 备份文件
+│
+└── logs/                       # 日志文件
+```
+
+---
+
+## 配置文件说明
+
+`config.json` 包含两个工具的配置:
+
+### 账单导入配置
+
+```json
+{
+  "accounts": {
+    "账本名": {
+      "app_token": "飞书App Token",
+      "table_id": "飞书表格ID",
+      "name": "账本显示名称",
+      "data_dir": "账单文件目录",
+      "last_import_timestamp": {
+        "alipay": 1234567890000,
+        "wechat": 1234567890000
+      }
+    }
+  },
+  "mcp_server": {
+    "app_id": "飞书应用ID",
+    "app_secret": "飞书应用密钥"
+  },
+  "import_settings": {
+    "batch_size": 500,
+    "delay_between_records": 0.0001,
+    "delay_between_batches": 0.0001
+  }
+}
+```
+
+### 资产同步配置
+
+```json
+{
+  "asset_sync": {
+    "enabled": true,
+    "feishu": {
+      "app_token": "飞书App Token",
+      "tables": {
+        "holdings": "持仓表ID",
+        "history": "历史表ID",
+        "logs": "日志表ID"
+      }
+    },
+    "binance": {
+      "enabled": true,
+      "api_key": "YOUR_API_KEY",
+      "api_secret": "YOUR_SECRET"
+    },
+    "xueqiu": {
+      "enabled": true,
+      "cookies": "xq_a_token=..."
+    },
+    "scheduler": {
+      "crypto_sync": {
+        "enabled": true,
+        "hour": "*",
+        "minute": 0
+      },
+      "fund_sync": {
+        "enabled": true,
+        "hour": 9,
+        "minute": 0
+      },
+      "snapshot": {
+        "enabled": true,
+        "hour": 0,
+        "minute": 0
+      }
+    },
+    "database": {
+      "path": "data/assets.db",
+      "backup": {
+        "enabled": true,
+        "keep_days": 30
+      }
+    },
+    "alerts": {
+      "enabled": true,
+      "feishu_webhook": "https://...",
+      "min_success_rate": 0.8
+    }
+  }
+}
 ```
 
 ---
@@ -592,11 +457,43 @@ sudo systemctl stop feishu-asset-sync
 - **Python 3.10+**
 - **uv** - 项目和依赖管理
 - **APScheduler** - 定时任务调度
-- **ccxt** - 币安 API
+- **ccxt** - Binance API
 - **pysnowball** - 雪球 API
+- **pandas** - 账单解析
 - **loguru** - 日志系统
 - **SQLite** - 本地数据库
 - **Feishu API** - 飞书多维表格
+
+---
+
+## 常见问题
+
+### 账单导入
+
+**Q: 支持哪些账单格式?**
+- 支付宝: CSV格式 (导出时选择"标准格式")
+- 微信: XLSX格式 (支付-钱包-账单-下载账单)
+
+**Q: 如何避免重复导入?**
+系统会记录 `last_import_timestamp`,只导入时间戳大于此值的记录。
+
+**Q: 如何自定义分类规则?**
+编辑 `lib/smart_categorizer.py` 中的 `KEYWORD_RULES` 和 `EXACT_MERCHANT_MAP`。
+
+### 资产同步
+
+**Q: 为什么同步失败?**
+检查:
+- 网络连接
+- API Key 是否正确
+- Cookies 是否过期
+- 查看日志: `tail -f logs/sync_*.log`
+
+**Q: 如何修改同步频率?**
+编辑 `config.json` 中的 `scheduler` 配置。
+
+**Q: 备份占用太多空间?**
+调整 `database.backup.keep_days` 参数。
 
 ---
 
@@ -610,18 +507,24 @@ MIT License
 
 ### v1.0.0 (2025-01-20)
 
-**核心功能**:
-- ✅ Binance 加密货币同步
-- ✅ 雪球基金同步
-- ✅ 自动资产发现
-- ✅ Ignore 规则过滤
-- ✅ SQLite + 飞书双存储
-- ✅ 定时任务调度
-- ✅ 每日快照
-- ✅ 数据库自动备份
-- ✅ 飞书机器人告警
-- ✅ 完整日志系统
+**账单导入工具**:
+- 支付宝CSV和微信XLSX解析
+- 智能分类 (12种分类规则)
+- 增量导入机制
+- 批量处理和去重
+
+**资产同步系统**:
+- Binance加密货币同步
+- 雪球基金同步
+- 自动资产发现
+- SQLite + 飞书双存储
+- 定时任务调度
+- 每日快照
+- 数据库自动备份
+- 飞书机器人告警
 
 ---
 
-**开始使用**: `./main.py --run-once`
+**快速开始**:
+- 账单导入: `python import.py`
+- 资产同步: `./main.py --run-once`

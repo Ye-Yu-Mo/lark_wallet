@@ -251,8 +251,13 @@ class AssetFeishuClient(FeishuClient):
             # 使用PUT方法更新记录
             response = requests.put(url, headers=headers, json=data, timeout=10)
             result = response.json()
+
+            if result.get("code") != 0:
+                print(f"更新记录失败: {result}")
+
             return result.get("code") == 0
-        except Exception:
+        except Exception as e:
+            print(f"更新记录异常: {e}")
             return False
 
     def get_all_holdings(self) -> List[Dict]:
@@ -261,7 +266,10 @@ class AssetFeishuClient(FeishuClient):
 
         :return: 持仓记录列表
         """
-        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.holdings_table_id}/records"
+        import requests
+
+        # 使用查询接口而不是列表接口
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.holdings_table_id}/records/search"
 
         headers = {
             "Authorization": f"Bearer {self.get_tenant_access_token()}",
@@ -269,10 +277,13 @@ class AssetFeishuClient(FeishuClient):
         }
 
         try:
-            result = self._api_call_with_retry(url, headers, {}, max_retries=2)
+            # 使用POST方法查询
+            response = requests.post(url, headers=headers, json={"page_size": 100}, timeout=10)
+            result = response.json()
 
             if result.get("code") == 0:
-                return result.get("data", {}).get("items", [])
+                items = result.get("data", {}).get("items", [])
+                return items
 
             return []
 

@@ -41,6 +41,12 @@ class SimpleBinanceClient:
             'X-MBX-APIKEY': self.api_key
         })
 
+        # 代理配置
+        self.session.proxies.update({
+            'http': 'http://127.0.0.1:7890',
+            'https': 'http://127.0.0.1:7890'
+        })
+
     def _generate_signature(self, params: Dict) -> str:
         """
         生成HMAC SHA256签名

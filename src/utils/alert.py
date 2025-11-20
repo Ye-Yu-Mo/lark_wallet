@@ -25,6 +25,12 @@ class AlertManager:
         self.webhook_url = webhook_url
         self.enabled = enabled
 
+        # 代理配置
+        self.proxies = {
+            'http': 'http://127.0.0.1:7890',
+            'https': 'http://127.0.0.1:7890'
+        }
+
     def send_alert(
         self,
         title: str,
@@ -95,7 +101,8 @@ class AlertManager:
             response = requests.post(
                 self.webhook_url,
                 json=message,
-                timeout=10
+                timeout=10,
+                proxies=self.proxies
             )
 
             if response.status_code == 200:

@@ -1,0 +1,276 @@
+"""
+基金同步任务
+定时从雪球获取基金净值,同步到 SQLite 和飞书
+"""
+import time
+from typing import Dict, List, Optional
+from datetime import datetime, date
+from loguru import logger
+
+from core.config import Config
+from core.database import AssetDB
+from core.feishu_client import AssetFeishuClient
+from datasources.xueqiu_client import XueqiuClient
+from utils.asset_discovery import get_fund_assets
+
+
+class FundSyncTask:
+    """
+    基金同步任务
+
+    负责从雪球获取基金净值数据,
+    保存到 SQLite 并更新飞书表格
+    """
+
+    def __init__(self, config: Config):
+        """
+        初始化同步任务
+
+        :param config: 配置对象
+        """
+        self.config = config
+
+        # 获取配置
+        asset_sync = config.get_asset_sync_config()
+        xueqiu_config = asset_sync.get('xueqiu', {})
+        feishu_config = config.get_feishu_config()
+        db_config = config.get_database_config()
+
+        # 初始化数据库
+        self.db = AssetDB(db_config['path'])
+
+        # 初始化飞书客户端
+        self.feishu = AssetFeishuClient(
+            app_id=feishu_config['app_id'],
+            app_secret=feishu_config['app_secret'],
+            app_token=feishu_config['app_token'],
+            table_ids=feishu_config['tables']
+        )
+
+        # 初始化雪球客户端
+        self.xueqiu = XueqiuClient(
+            cookies=xueqiu_config['cookies']
+        )
+
+        # 获取基金配置 (支持新旧格式)
+        self.fund_config = asset_sync.get('assets', {}).get('funds', [])
+
+        logger.info(f"FundSyncTask 初始化完成")
+
+    def sync(self) -> Dict:
+        """
+        执行同步任务
+
+        :return: 同步结果统计
+        """
+        start_time = time.time()
+
+        result = {
+            'total': 0,
+            'success': 0,
+            'failed': 0,
+            'skipped': 0,
+            'errors': []
+        }
+
+        # 检查是否是交易日
+        if not self._is_trading_day():
+            logger.info("今天不是交易日,跳过基金同步")
+            return result
+
+        # 获取飞书持仓数据 (用于自动发现基金)
+        holdings_data = None
+        try:
+            # 从飞书读取所有持仓
+            holdings_data = self.feishu.get_all_holdings()
+        except Exception as e:
+            logger.warning(f"从飞书读取持仓失败: {e}")
+
+        # 自动发现或获取配置的基金列表
+        fund_list = get_fund_assets(self.xueqiu, self.fund_config, holdings_data)
+
+        if not fund_list:
+            logger.warning("基金列表为空,跳过同步")
+            return result
+
+        result['total'] = len(fund_list)
+        logger.info(f"开始同步基金, 共 {len(fund_list)} 只基金")
+
+        for fund_config in fund_list:
+            try:
+                success = self._sync_fund(fund_config)
+                if success:
+                    result['success'] += 1
+                else:
+                    result['failed'] += 1
+                    result['errors'].append({
+                        'symbol': fund_config.get('symbol', 'unknown'),
+                        'error': '同步失败'
+                    })
+            except Exception as e:
+                result['failed'] += 1
+                error_msg = str(e)
+                result['errors'].append({
+                    'symbol': fund_config.get('symbol', 'unknown'),
+                    'error': error_msg
+                })
+                logger.error(f"同步基金失败: {fund_config.get('symbol', 'unknown')} - {error_msg}")
+
+        # 计算耗时
+        duration = time.time() - start_time
+
+        # 记录同步日志到飞书
+        status = 'success' if result['failed'] == 0 else 'partial'
+        error_summary = '; '.join([f"{e['symbol']}: {e['error']}" for e in result['errors'][:3]])
+
+        try:
+            self.feishu.log_sync_status(
+                source='xueqiu',
+                task_type='fund_sync',
+                status=status,
+                record_count=result['success'],
+                error_msg=error_summary if error_summary else None,
+                duration=duration
+            )
+        except Exception as e:
+            logger.error(f"记录同步日志失败: {e}")
+
+        logger.info(f"基金同步完成: 成功 {result['success']}/{result['total']}, 耗时 {duration:.2f}s")
+
+        return result
+
+    def _sync_fund(self, fund_config: Dict) -> bool:
+        """
+        同步单只基金
+
+        :param fund_config: 基金配置
+        :return: 是否成功
+        """
+        symbol = fund_config.get('symbol')  # 如 'SH510300'
+        shares = fund_config.get('shares', 0)  # 持有份额
+        avg_cost = fund_config.get('avg_cost', 0)  # 平均成本
+
+        if not symbol:
+            logger.warning("基金配置缺少 symbol 字段")
+            return False
+
+        logger.debug(f"同步基金: {symbol}")
+
+        # 1. 获取当前净值
+        nav = self.xueqiu.get_price(symbol)
+        if nav is None:
+            logger.error(f"获取净值失败: {symbol}")
+            return False
+
+        # 2. 获取基金详细信息
+        fund_info = self.xueqiu.get_fund_info(symbol)
+        fund_name = fund_config.get('name', symbol)
+        volume = None
+
+        if fund_info:
+            fund_name = fund_info.get('name', fund_name)
+            volume = fund_info.get('volume')
+
+        # 3. 保存价格到 SQLite
+        try:
+            self.db.save_price(
+                symbol=symbol,
+                price=nav,
+                volume=volume,
+                source='xueqiu'
+            )
+        except Exception as e:
+            logger.error(f"保存净值到数据库失败: {symbol} - {e}")
+
+        # 4. 更新持仓到 SQLite
+        if shares > 0:
+            try:
+                self.db.update_holding(
+                    symbol=symbol,
+                    asset_type='fund',
+                    quantity=shares,
+                    avg_cost=avg_cost,
+                    platform='xueqiu'
+                )
+            except Exception as e:
+                logger.error(f"更新持仓到数据库失败: {symbol} - {e}")
+
+        # 5. 计算收益
+        current_value = shares * nav
+        cost_value = shares * avg_cost if avg_cost > 0 else 0
+        profit = current_value - cost_value
+        profit_percent = (profit / cost_value * 100) if cost_value > 0 else 0
+
+        # 6. 获取涨跌幅
+        change_percent = 0
+        if fund_info:
+            change_percent = fund_info.get('percent', 0)
+
+        # 7. 更新飞书持仓表
+        try:
+            feishu_data = {
+                '资产名称': fund_name,
+                '资产类型': '基金',
+                '数量': shares,
+                '当前价格': nav,
+                '当前市值': current_value,
+                '成本价': avg_cost,
+                '总成本': cost_value,
+                '收益': profit,
+                '收益率': profit_percent,
+                '日涨跌': change_percent,
+                '数据来源': 'xueqiu',
+                '更新时间': int(datetime.now().timestamp() * 1000)
+            }
+
+            self.feishu.update_holding(symbol, feishu_data)
+            logger.debug(f"更新飞书成功: {symbol}, 净值: {nav}, 市值: {current_value}")
+
+        except Exception as e:
+            logger.error(f"更新飞书失败: {symbol} - {e}")
+            return False
+
+        return True
+
+    def _is_trading_day(self) -> bool:
+        """
+        检查今天是否是交易日
+
+        简单判断: 周一到周五为交易日
+        注意: 这里没有处理节假日,实际使用时需要完善
+
+        :return: 是否是交易日
+        """
+        today = date.today()
+        # 周一=0, 周日=6
+        return today.weekday() < 5
+
+
+def sync_fund(config_path: str = 'config.json') -> Dict:
+    """
+    执行基金同步 (便捷函数)
+
+    :param config_path: 配置文件路径
+    :return: 同步结果
+    """
+    config = Config(config_path)
+    task = FundSyncTask(config)
+    return task.sync()
+
+
+if __name__ == '__main__':
+    # 直接运行测试
+    import sys
+    from pathlib import Path
+
+    # 添加项目根目录到路径
+    project_root = Path(__file__).parent.parent.parent
+    sys.path.insert(0, str(project_root))
+
+    # 设置日志
+    from core.logger import setup_logger
+    setup_logger(level='DEBUG')
+
+    # 执行同步
+    result = sync_fund()
+    print(f"\n同步结果: {result}")

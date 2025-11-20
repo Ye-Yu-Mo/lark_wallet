@@ -1,0 +1,18 @@
+[Unit]
+Description=Feishu Asset Sync Service
+After=network.target
+
+[Service]
+Type=simple
+User=YOUR_USERNAME
+Group=YOUR_GROUP
+WorkingDirectory=/opt/feishu-asset-sync
+Environment="PATH=/opt/feishu-asset-sync/.venv/bin:/usr/local/bin:/usr/bin:/bin"
+ExecStart=/opt/feishu-asset-sync/.venv/bin/python /opt/feishu-asset-sync/main.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/var/log/feishu-asset-sync.log
+StandardError=append:/var/log/feishu-asset-sync.error.log
+
+[Install]
+WantedBy=multi-user.target

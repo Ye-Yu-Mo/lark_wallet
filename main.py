@@ -28,6 +28,7 @@ from schedulers.periodic_report import generate_weekly_report, generate_monthly_
 from schedulers.milestone_alert import check_milestones
 from schedulers.holding_period_reminder import check_holding_periods
 from schedulers.sync_error_summary import generate_error_summary
+from schedulers.feishu_backup import sync_feishu_backup
 from utils.backup import create_backup
 from utils.alert import AlertManager
 
@@ -291,6 +292,23 @@ class AssetSyncService:
                 replace_existing=True
             )
             logger.info(f"已注册任务: 数据库备份 (每天 01:00)")
+
+        # 13. 飞书多维表备份任务
+        feishu_backup_config = scheduler_config.get('feishu_backup', {})
+        if feishu_backup_config.get('enabled', False):
+            hour = feishu_backup_config.get('hour', 2)
+            minute = feishu_backup_config.get('minute', 30)
+
+            self.scheduler.add_job(
+                func=lambda: sync_feishu_backup(self.config_path),
+                trigger='cron',
+                hour=hour,
+                minute=minute,
+                id='feishu_backup',
+                name='飞书备份',
+                replace_existing=True
+            )
+            logger.info(f"已注册任务: 飞书备份 (每天 {hour:02d}:{minute:02d})")
 
         # 检查是否有任务被注册
         jobs = self.scheduler.get_jobs()

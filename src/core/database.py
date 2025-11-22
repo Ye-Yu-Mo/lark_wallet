@@ -2,6 +2,7 @@
 SQLite 数据库封装模块
 管理资产价格、K线、持仓、订单等数据
 """
+import json
 import sqlite3
 import time
 from pathlib import Path
@@ -11,6 +12,12 @@ from contextlib import contextmanager
 
 class AssetDB:
     """SQLite 数据库管理类"""
+
+    FEISHU_TABLES = {
+        'holdings': 'feishu_holdings',
+        'history': 'feishu_history',
+        'logs': 'feishu_logs'
+    }
 
     def __init__(self, db_path='data/assets.db'):
         """
@@ -122,6 +129,43 @@ class AssetDB:
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_orders_symbol_timestamp
                 ON orders(symbol, timestamp)
+            """)
+
+            # 5. 飞书快照表 (三张镜像表 + 元数据)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS feishu_holdings (
+                    record_id TEXT PRIMARY KEY,
+                    fields_json TEXT NOT NULL,
+                    updated_at INTEGER,
+                    synced_at INTEGER NOT NULL
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS feishu_history (
+                    record_id TEXT PRIMARY KEY,
+                    fields_json TEXT NOT NULL,
+                    updated_at INTEGER,
+                    synced_at INTEGER NOT NULL
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS feishu_logs (
+                    record_id TEXT PRIMARY KEY,
+                    fields_json TEXT NOT NULL,
+                    updated_at INTEGER,
+                    synced_at INTEGER NOT NULL
+                )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS feishu_backup_meta (
+                    table_name TEXT PRIMARY KEY,
+                    record_count INTEGER NOT NULL,
+                    last_synced_at INTEGER NOT NULL,
+                    duration REAL NOT NULL
+                )
             """)
 
     # ===== 价格相关方法 =====
@@ -390,3 +434,60 @@ class AssetDB:
             cursor = conn.cursor()
             cursor.execute(f"SELECT COUNT(*) FROM {table_name}")
             return cursor.fetchone()[0]
+
+    # ===== 飞书备份相关 =====
+
+    def replace_feishu_table_records(self, table_key: str, records: List[Dict]) -> int:
+        """将飞书表记录全量写入本地镜像表"""
+        sqlite_table = self.FEISHU_TABLES.get(table_key)
+        if not sqlite_table:
+            raise ValueError(f"未知的飞书表: {table_key}")
+
+        current_ts = int(time.time())
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(f"DELETE FROM {sqlite_table}")
+
+            if not records:
+                return 0
+
+            payload = []
+            for item in records:
+                record_id = item.get('record_id')
+                fields = item.get('fields', {})
+                updated_at = item.get('updated_at')
+                payload.append((record_id, json.dumps(fields, ensure_ascii=False), updated_at, current_ts))
+
+            cursor.executemany(
+                f"""
+                INSERT INTO {sqlite_table} (record_id, fields_json, updated_at, synced_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                payload
+            )
+
+            return len(payload)
+
+    def update_feishu_backup_meta(self, table_key: str, record_count: int, duration: float):
+        """记录飞书备份同步状态"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO feishu_backup_meta (table_name, record_count, last_synced_at, duration)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(table_name) DO UPDATE SET
+                    record_count=excluded.record_count,
+                    last_synced_at=excluded.last_synced_at,
+                    duration=excluded.duration
+                """,
+                (table_key, record_count, int(time.time()), round(duration, 2))
+            )
+
+    def get_feishu_backup_meta(self) -> List[Dict]:
+        """获取飞书备份状态列表"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM feishu_backup_meta ORDER BY table_name ASC")
+            return [dict(row) for row in cursor.fetchall()]

@@ -4,7 +4,7 @@
 """
 import time
 from typing import Dict, List, Optional
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from loguru import logger
 
 from core.config import Config
@@ -73,9 +73,10 @@ class FundSyncTask:
             'errors': []
         }
 
-        # 检查是否是交易日
-        if not self._is_trading_day():
-            logger.info("今天不是交易日,跳过基金同步")
+        # 检查昨日是否是交易日 (基金净值通常在次日更新)
+        previous_day = date.today() - timedelta(days=1)
+        if not self._is_trading_day(previous_day):
+            logger.info("昨天不是交易日,跳过基金同步")
             return result
 
         # 从飞书读取持仓数据 (用于资产发现和数据补充)
@@ -234,18 +235,19 @@ class FundSyncTask:
 
         return True
 
-    def _is_trading_day(self) -> bool:
+    def _is_trading_day(self, target_date: Optional[date] = None) -> bool:
         """
-        检查今天是否是交易日
+        检查指定日期是否是交易日
 
+        默认判断昨日是否为交易日 (基金净值在次日更新)
         简单判断: 周一到周五为交易日
         注意: 这里没有处理节假日,实际使用时需要完善
 
         :return: 是否是交易日
         """
-        today = date.today()
+        target_date = target_date or date.today()
         # 周一=0, 周日=6
-        return today.weekday() < 5
+        return target_date.weekday() < 5
 
 
 def sync_fund(config_path: str = 'config.json') -> Dict:

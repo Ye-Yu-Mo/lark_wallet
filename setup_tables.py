@@ -45,7 +45,16 @@ def main():
 
         # 验证表结构
         print("\n[3/4] 验证表结构...")
-        tables = ['price_history', 'klines', 'holdings', 'orders']
+        tables = [
+            'price_history',
+            'klines',
+            'holdings',
+            'orders',
+            'feishu_holdings',
+            'feishu_history',
+            'feishu_logs',
+            'feishu_backup_meta'
+        ]
 
         for table_name in tables:
             try:

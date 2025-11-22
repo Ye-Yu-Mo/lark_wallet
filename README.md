@@ -129,6 +129,7 @@ python import.py --config my_config.json
 - 自动资产发现 (Binance余额 / 飞书持仓表)
 - 定时同步 (加密货币每小时 / 基金每天)
 - 双存储 (SQLite本地 + 飞书云端)
+- 飞书多维表全量备份到 SQLite (离线热备)
 - 每日快照
 - 自动备份
 - 告警通知
@@ -175,6 +176,11 @@ python import.py --config my_config.json
         "enabled": true,
         "hour": 0,
         "minute": 0
+      },
+      "feishu_backup": {
+        "enabled": true,
+        "hour": 2,
+        "minute": 30
       }
     },
     "database": {
@@ -183,6 +189,11 @@ python import.py --config my_config.json
         "enabled": true,
         "keep_days": 30
       }
+    },
+    "feishu_backup": {
+      "enabled": true,
+      "tables": ["holdings", "history", "logs"],
+      "page_size": 200
     },
     "alerts": {
       "enabled": true,
@@ -224,10 +235,11 @@ python setup_tables.py
     ├─ 加密货币同步 (每小时)
     ├─ 基金同步 (每天9:00)
     ├─ 每日快照 (每天0:00)
-    └─ 数据库备份 (每天1:00)
+    ├─ 数据库备份 (每天1:00)
+    └─ 飞书备份 (每天2:30)
     ↓
 双存储
-    ├─ SQLite (本地高性能)
+    ├─ SQLite (行情/订单 + 飞书镜像)
     └─ 飞书 (云端可视化)
     ↓
 监控告警 (飞书机器人)
@@ -241,6 +253,7 @@ python setup_tables.py
 | 基金同步 | 每天 9:00 | 只在交易日执行 |
 | 每日快照 | 每天 0:00 | 记录总资产 |
 | 数据库备份 | 每天 1:00 | 自动备份并清理 |
+| 飞书备份 | 每天 2:30 | 飞书表 → SQLite 全量备份 |
 
 ### 飞书表格结构
 
@@ -300,6 +313,19 @@ db.restore_backup('data/backups/assets_20250120_010000.db')
 "
 ```
 
+### 飞书备份
+
+- 作用: 飞书多维表(`holdings/history/logs`)全量落地到 SQLite (`feishu_holdings`, `feishu_history`, `feishu_logs` + `feishu_backup_meta`) 作为热备。
+- 配置: `asset_sync.feishu_backup.enabled=true` 并指定 `tables`/`page_size`。
+
+```bash
+# 手动触发一次飞书备份
+python -c "from src.schedulers.feishu_backup import sync_feishu_backup; sync_feishu_backup()"
+
+# 查看备份元数据
+sqlite3 data/assets.db "SELECT table_name, record_count, datetime(last_synced_at, 'unixepoch', 'localtime') FROM feishu_backup_meta;"
+```
+
 ### 服务器部署 (systemd)
 
 ```bash
@@ -351,7 +377,8 @@ feishu/
 │   └── utils/                 # 工具模块
 │       ├── asset_discovery.py
 │       ├── alert.py
-│       └── backup.py
+│       ├── backup.py
+│       └── feishu_backup.py
 │
 ├── data/                       # 数据目录
 │   ├── assets.db              # SQLite 数据库
@@ -432,6 +459,11 @@ feishu/
         "enabled": true,
         "hour": 0,
         "minute": 0
+      },
+      "feishu_backup": {
+        "enabled": true,
+        "hour": 2,
+        "minute": 30
       }
     },
     "database": {
@@ -440,6 +472,11 @@ feishu/
         "enabled": true,
         "keep_days": 30
       }
+    },
+    "feishu_backup": {
+      "enabled": true,
+      "tables": ["holdings", "history", "logs"],
+      "page_size": 200
     },
     "alerts": {
       "enabled": true,

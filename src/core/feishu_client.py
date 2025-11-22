@@ -130,20 +130,6 @@ class AssetFeishuClient(FeishuClient):
 
         return {"success": success, "failed": failed, "errors": errors}
 
-    def get_all_holdings(self) -> List[Dict]:
-        """
-        获取所有持仓记录
-
-        :return: 持仓列表
-        """
-        try:
-            records = self.list_records(self.app_token, self.holdings_table_id)
-            # 提取 fields
-            return [record.get('fields', {}) for record in records.get('items', [])]
-        except Exception as e:
-            logger.error(f"获取持仓列表失败: {e}")
-            return []
-
     # ===== 历史表操作 =====
 
     def create_snapshot(self, snapshot_data: Dict) -> bool:
@@ -260,32 +246,48 @@ class AssetFeishuClient(FeishuClient):
             print(f"更新记录异常: {e}")
             return False
 
-    def get_all_holdings(self) -> List[Dict]:
-        """
-        获取所有持仓记录
-
-        :return: 持仓记录列表
-        """
-        import requests
-
-        # 使用查询接口而不是列表接口
-        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{self.holdings_table_id}/records/search"
+    def fetch_table_records(self, table_id: str, page_size: int = 200) -> List[Dict]:
+        """按页获取指定表的所有记录"""
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{self.app_token}/tables/{table_id}/records/search"
 
         headers = {
             "Authorization": f"Bearer {self.get_tenant_access_token()}",
             "Content-Type": "application/json"
         }
 
+        records: List[Dict] = []
+        page_token = None
+
+        while True:
+            payload = {"page_size": page_size}
+            if page_token:
+                payload["page_token"] = page_token
+
+            result = self._api_call_with_retry(url, headers, payload, max_retries=3, timeout=15)
+
+            if result.get("code") != 0:
+                raise RuntimeError(f"获取表 {table_id} 记录失败: {result}")
+
+            data = result.get("data", {})
+            items = data.get("items", [])
+            records.extend(items)
+
+            if not data.get("has_more"):
+                break
+
+            page_token = data.get("page_token")
+            if not page_token:
+                break
+
+        return records
+
+    def get_all_holdings(self) -> List[Dict]:
+        """
+        获取所有持仓记录
+
+        :return: 持仓记录列表
+        """
         try:
-            # 使用POST方法查询
-            response = requests.post(url, headers=headers, json={"page_size": 100}, timeout=10)
-            result = response.json()
-
-            if result.get("code") == 0:
-                items = result.get("data", {}).get("items", [])
-                return items
-
-            return []
-
+            return self.fetch_table_records(self.holdings_table_id)
         except Exception:
             return []

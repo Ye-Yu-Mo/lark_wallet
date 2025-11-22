@@ -103,6 +103,17 @@ class Config:
             if 'cookies' not in xueqiu:
                 raise ValueError("xueqiu已启用但缺少 'cookies'")
 
+        # 验证飞书备份配置
+        feishu_backup = asset_sync.get('feishu_backup')
+        if feishu_backup:
+            tables = feishu_backup.get('tables')
+            if tables is not None and not isinstance(tables, list):
+                raise ValueError("feishu_backup.tables 必须是数组")
+
+            page_size = feishu_backup.get('page_size', 200)
+            if not isinstance(page_size, int) or page_size <= 0 or page_size > 500:
+                raise ValueError("feishu_backup.page_size 必须在 1-500 之间")
+
     # ===== 账单导入相关方法 =====
 
     def get_account(self, account_name):
@@ -226,6 +237,11 @@ class Config:
             'max_bytes': 10485760,
             'backup_count': 5
         })
+
+    def get_feishu_backup_config(self):
+        """获取飞书备份配置"""
+        asset_sync = self.get_asset_sync_config()
+        return asset_sync.get('feishu_backup', {'enabled': False})
 
     # ===== 通用方法 =====
 

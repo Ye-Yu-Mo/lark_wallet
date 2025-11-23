@@ -6,7 +6,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 from contextlib import contextmanager
 
 
@@ -166,6 +166,28 @@ class AssetDB:
                     last_synced_at INTEGER NOT NULL,
                     duration REAL NOT NULL
                 )
+            """)
+
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS feishu_change_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    table_name TEXT NOT NULL,
+                    record_id TEXT,
+                    change_type TEXT NOT NULL,
+                    changed_fields TEXT,
+                    previous_hash TEXT,
+                    current_hash TEXT,
+                    previous_fields_json TEXT,
+                    current_fields_json TEXT,
+                    detected_at INTEGER NOT NULL,
+                    resolved INTEGER NOT NULL DEFAULT 0,
+                    resolved_at INTEGER
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_feishu_change_log_table
+                ON feishu_change_log(table_name, resolved)
             """)
 
     # ===== 价格相关方法 =====
@@ -468,6 +490,195 @@ class AssetDB:
             )
 
             return len(payload)
+
+    def get_feishu_snapshot(self, table_key: str) -> Dict[str, Dict[str, Any]]:
+        """获取指定飞书镜像表的当前快照"""
+        sqlite_table = self.FEISHU_TABLES.get(table_key)
+        if not sqlite_table:
+            raise ValueError(f"未知的飞书表: {table_key}")
+
+        snapshot: Dict[str, Dict[str, Any]] = {}
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT record_id, fields_json, updated_at FROM {sqlite_table}"
+            )
+            for row in cursor.fetchall():
+                try:
+                    fields = json.loads(row['fields_json']) if row['fields_json'] else {}
+                except json.JSONDecodeError:
+                    fields = {}
+
+                snapshot[row['record_id']] = {
+                    'fields': fields,
+                    'updated_at': row['updated_at']
+                }
+
+        return snapshot
+
+    def record_feishu_changes(self, table_key: str, changes: List[Dict[str, Any]]):
+        """记录飞书镜像与最新数据的差异"""
+        if not changes:
+            return
+
+        current_ts = int(time.time())
+
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+
+            for change in changes:
+                record_id = change.get('record_id')
+                change_type = change.get('change_type')
+                changed_fields = change.get('changed_fields') or []
+                previous_fields = change.get('previous_fields')
+                current_fields = change.get('current_fields')
+                previous_hash = change.get('previous_hash')
+                current_hash = change.get('current_hash')
+
+                changed_fields_json = json.dumps(changed_fields, ensure_ascii=False) if changed_fields else None
+                previous_fields_json = json.dumps(previous_fields, ensure_ascii=False) if previous_fields is not None else None
+                current_fields_json = json.dumps(current_fields, ensure_ascii=False) if current_fields is not None else None
+
+                # 如果存在未解决记录,更新其最新状态
+                existing = None
+                if record_id:
+                    existing = cursor.execute(
+                        """
+                        SELECT id, previous_fields_json FROM feishu_change_log
+                        WHERE table_name = ? AND record_id = ? AND change_type = ? AND resolved = 0
+                        """,
+                        (table_key, record_id, change_type)
+                    ).fetchone()
+
+                if existing:
+                    cursor.execute(
+                        """
+                        UPDATE feishu_change_log
+                        SET changed_fields=?, current_hash=?, current_fields_json=?, detected_at=?
+                        WHERE id=?
+                        """,
+                        (changed_fields_json, current_hash, current_fields_json, current_ts, existing['id'])
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        INSERT INTO feishu_change_log (
+                            table_name, record_id, change_type, changed_fields,
+                            previous_hash, current_hash, previous_fields_json,
+                            current_fields_json, detected_at, resolved
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+                        """,
+                        (
+                            table_key,
+                            record_id,
+                            change_type,
+                            changed_fields_json,
+                            previous_hash,
+                            current_hash,
+                            previous_fields_json,
+                            current_fields_json,
+                            current_ts
+                        )
+                    )
+
+    def get_locked_feishu_fields(self, table_key: str, record_id: str) -> List[str]:
+        """获取指定记录被标记为用户手动修改的字段列表"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT changed_fields FROM feishu_change_log
+                WHERE table_name = ? AND record_id = ? AND resolved = 0
+                """,
+                (table_key, record_id)
+            )
+
+            locked = []
+            for row in cursor.fetchall():
+                if not row['changed_fields']:
+                    continue
+                try:
+                    fields = json.loads(row['changed_fields'])
+                    if isinstance(fields, list):
+                        locked.extend(fields)
+                except json.JSONDecodeError:
+                    continue
+
+            return list(dict.fromkeys(locked))
+
+    def resolve_feishu_change(self, table_key: str, record_id: str):
+        """将指定记录的手动修改标记为已处理"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE feishu_change_log
+                SET resolved = 1, resolved_at = ?
+                WHERE table_name = ? AND record_id = ? AND resolved = 0
+                """,
+                (int(time.time()), table_key, record_id)
+            )
+
+    def get_pending_feishu_changes(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """获取待处理的飞书手动修改记录"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT * FROM feishu_change_log
+                WHERE resolved = 0
+                ORDER BY detected_at ASC
+                LIMIT ?
+                """,
+                (limit,)
+            )
+
+            changes: List[Dict[str, Any]] = []
+            for row in cursor.fetchall():
+                try:
+                    changed_fields = json.loads(row['changed_fields']) if row['changed_fields'] else []
+                except json.JSONDecodeError:
+                    changed_fields = []
+
+                try:
+                    previous_fields = json.loads(row['previous_fields_json']) if row['previous_fields_json'] else {}
+                except json.JSONDecodeError:
+                    previous_fields = {}
+
+                try:
+                    current_fields = json.loads(row['current_fields_json']) if row['current_fields_json'] else {}
+                except json.JSONDecodeError:
+                    current_fields = {}
+
+                changes.append({
+                    'id': row['id'],
+                    'table_name': row['table_name'],
+                    'record_id': row['record_id'],
+                    'change_type': row['change_type'],
+                    'changed_fields': changed_fields,
+                    'previous_fields': previous_fields,
+                    'current_fields': current_fields,
+                    'previous_hash': row['previous_hash'],
+                    'current_hash': row['current_hash'],
+                    'detected_at': row['detected_at']
+                })
+
+            return changes
+
+    def resolve_feishu_change_by_id(self, change_id: int) -> bool:
+        """按ID标记飞书手动修改记录已处理"""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE feishu_change_log
+                SET resolved = 1, resolved_at = ?
+                WHERE id = ? AND resolved = 0
+                """,
+                (int(time.time()), change_id)
+            )
+            return cursor.rowcount > 0
 
     def update_feishu_backup_meta(self, table_key: str, record_count: int, duration: float):
         """记录飞书备份同步状态"""

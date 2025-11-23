@@ -69,7 +69,7 @@ class AssetFeishuClient(FeishuClient):
         except Exception:
             return None
 
-    def update_holding(self, symbol: str, data: Dict) -> bool:
+    def update_holding(self, symbol: str, data: Dict, record_id: Optional[str] = None) -> bool:
         """
         更新持仓记录 (存在则更新,不存在则创建)
 
@@ -84,10 +84,11 @@ class AssetFeishuClient(FeishuClient):
                 '最后更新时间': 1700000000000,
                 '更新状态': '成功'
             }
+        :param record_id: 可选的飞书记录ID,避免重复查询
         :return: 是否成功
         """
         # 1. 查找是否已存在记录
-        record_id = self.get_holding_record_id(symbol)
+        record_id = record_id or self.get_holding_record_id(symbol)
 
         if record_id:
             # 存在则更新
@@ -187,6 +188,16 @@ class AssetFeishuClient(FeishuClient):
         }
 
         return self._create_record(self.logs_table_id, log_data)
+
+    # ===== 通用表操作 =====
+
+    def create_custom_record(self, table_id: str, fields: Dict) -> bool:
+        """向任意表创建记录"""
+        return self._create_record(table_id, fields)
+
+    def update_custom_record(self, table_id: str, record_id: str, fields: Dict) -> bool:
+        """更新任意表记录"""
+        return self._update_record(table_id, record_id, fields)
 
     # ===== 通用方法 =====
 

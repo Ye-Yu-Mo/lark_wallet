@@ -12,6 +12,7 @@ from core.database import AssetDB
 from core.feishu_client import AssetFeishuClient
 from datasources.xueqiu_client import XueqiuClient
 from utils.asset_discovery import get_fund_assets
+from utils.feishu_guard import prepare_holdings_payload
 
 
 class FundSyncTask:
@@ -226,7 +227,23 @@ class FundSyncTask:
             if avg_cost > 0:
                 feishu_data['单位成本'] = avg_cost
 
-            self.feishu.update_holding(symbol, feishu_data)
+            record_id, sanitized_payload, blocked_fields = prepare_holdings_payload(
+                self.feishu,
+                self.db,
+                symbol,
+                feishu_data
+            )
+
+            if blocked_fields:
+                logger.warning(
+                    f"{symbol} 在飞书中存在手动变更字段 {blocked_fields}, 自动同步不会覆盖, 如需恢复自动更新请确认并清理记录"
+                )
+
+            if not sanitized_payload:
+                logger.warning(f"{symbol} 的飞书字段全部由用户维护, 跳过自动更新")
+                return True
+
+            self.feishu.update_holding(symbol, sanitized_payload, record_id=record_id)
             logger.debug(f"更新飞书成功: {symbol}, 净值: {nav}, 市值: {current_value}")
 
         except Exception as e:

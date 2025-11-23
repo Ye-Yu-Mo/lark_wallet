@@ -310,6 +310,23 @@ class AssetSyncService:
             )
             logger.info(f"已注册任务: 飞书备份 (每天 {hour:02d}:{minute:02d})")
 
+        # 14. 飞书手动修改审计同步任务
+        review_sync_config = scheduler_config.get('feishu_change_review', {})
+        if review_sync_config.get('enabled', False):
+            hour = review_sync_config.get('hour', 3)
+            minute = review_sync_config.get('minute', 0)
+
+            self.scheduler.add_job(
+                func=lambda: sync_feishu_change_review(self.config_path),
+                trigger='cron',
+                hour=hour,
+                minute=minute,
+                id='feishu_change_review',
+                name='飞书手动修改审计同步',
+                replace_existing=True
+            )
+            logger.info(f"已注册任务: 飞书手动修改审计同步 (每天 {hour:02d}:{minute:02d})")
+
         # 检查是否有任务被注册
         jobs = self.scheduler.get_jobs()
         if not jobs:

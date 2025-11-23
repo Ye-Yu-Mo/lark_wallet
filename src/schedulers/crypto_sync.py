@@ -13,6 +13,7 @@ from core.feishu_client import AssetFeishuClient
 from datasources.binance_client import BinanceClient
 from utils.asset_discovery import get_crypto_assets
 from utils.alert import AlertManager
+from utils.feishu_guard import prepare_holdings_payload
 
 
 class CryptoSyncTask:
@@ -284,7 +285,23 @@ class CryptoSyncTask:
             if avg_cost > 0:
                 feishu_data['单位成本'] = avg_cost
 
-            self.feishu.update_holding(symbol, feishu_data)
+            record_id, sanitized_payload, blocked_fields = prepare_holdings_payload(
+                self.feishu,
+                self.db,
+                symbol,
+                feishu_data
+            )
+
+            if blocked_fields:
+                logger.warning(
+                    f"{symbol} 在飞书中的字段 {blocked_fields} 已被手动修改, 自动同步不会覆盖"
+                )
+
+            if not sanitized_payload:
+                logger.warning(f"{symbol} 的飞书记录全部字段被保护, 跳过自动更新")
+                return True
+
+            self.feishu.update_holding(symbol, sanitized_payload, record_id=record_id)
             logger.debug(f"更新飞书成功: {symbol}, 价格: {price}, 市值: {current_value}")
 
         except Exception as e:

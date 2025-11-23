@@ -181,6 +181,11 @@ python import.py --config my_config.json
         "enabled": true,
         "hour": 2,
         "minute": 30
+      },
+      "feishu_change_review": {
+        "enabled": true,
+        "hour": 2,
+        "minute": 45
       }
     },
     "database": {
@@ -194,6 +199,13 @@ python import.py --config my_config.json
       "enabled": true,
       "tables": ["holdings", "history", "logs"],
       "page_size": 200
+    },
+    "feishu_change_review": {
+      "enabled": true,
+      "table_id": "tbl手动确认表ID",
+      "pending_status": "待确认",
+      "confirmed_status": "已确认",
+      "resolved_status": "已同步"
     },
     "alerts": {
       "enabled": true,
@@ -254,6 +266,7 @@ python setup_tables.py
 | 每日快照 | 每天 0:00 | 记录总资产 |
 | 数据库备份 | 每天 1:00 | 自动备份并清理 |
 | 飞书备份 | 每天 2:30 | 飞书表 → SQLite 全量备份 |
+| 飞书审计同步 | 每天 2:45 | 推送手动修改 → 飞书确认表并消费回写 |
 
 ### 飞书表格结构
 
@@ -324,6 +337,37 @@ python -c "from src.schedulers.feishu_backup import sync_feishu_backup; sync_fei
 
 # 查看备份元数据
 sqlite3 data/assets.db "SELECT table_name, record_count, datetime(last_synced_at, 'unixepoch', 'localtime') FROM feishu_backup_meta;"
+```
+
+### 飞书手动修改审计
+
+- 备份任务在同步 `holdings` 时会对比本地镜像, 将任何手动修改或删除写入 `feishu_change_log`。
+- 自动同步在推送持仓数据前会查询该表, 自动过滤掉被用户修改的字段, 避免覆盖。
+- 查看待处理的修改:
+
+```bash
+sqlite3 data/assets.db "SELECT table_name, record_id, changed_fields, datetime(detected_at, 'unixepoch', 'localtime') FROM feishu_change_log WHERE resolved = 0;"
+```
+
+- 如果确认变更已处理, 可清理对应记录恢复自动同步:
+
+```bash
+sqlite3 data/assets.db "UPDATE feishu_change_log SET resolved = 1, resolved_at = strftime('%s','now') WHERE record_id = 'recvXXXXXXX';"
+```
+
+- 日志会提示哪些字段被保护。要让系统重新接管这些字段, 先确认数据无误再将记录标记为 `resolved`。
+
+#### 审计确认视图
+
+1. 在飞书多维表中新建「手动修改审核」数据表, 至少包含以下文本字段: `变更ID`、`飞书记录ID`、`表名`、`资产代码`、`变更类型`、`变更字段`、`检测时间`、`处理状态`、`处理完成时间`(可选)、`备注`。
+2. 在 `asset_sync.feishu_change_review` 中填入该表的 `table_id` 以及期望的状态文案 (默认 `待确认/已确认/已同步`)。
+3. 启用 `scheduler.feishu_change_review`, 系统会在飞书备份后把 `feishu_change_log` 的记录推送到该表, 新增记录默认状态为 `待确认`。
+4. 用户在飞书表中查看差异, 当 `处理状态` 改成 `已确认` 时, 下一次同步会自动调用 `resolve_feishu_change_by_id`, 把数据库中的记录标记为已处理并把状态更新为 `已同步`/补上 `处理完成时间`。
+
+手动触发:
+
+```bash
+python -c "from src.schedulers.feishu_change_review import sync_feishu_change_review; sync_feishu_change_review()"
 ```
 
 ### 服务器部署 (systemd)

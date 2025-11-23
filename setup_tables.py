@@ -53,7 +53,8 @@ def main():
             'feishu_holdings',
             'feishu_history',
             'feishu_logs',
-            'feishu_backup_meta'
+            'feishu_backup_meta',
+            'feishu_change_log'
         ]
 
         for table_name in tables:

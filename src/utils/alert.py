@@ -32,12 +32,6 @@ class AlertManager:
         if email_config:
             self.email_sender = EmailSender(email_config)
 
-        # 代理配置
-        self.proxies = {
-            'http': 'http://127.0.0.1:7890',
-            'https': 'http://127.0.0.1:7890'
-        }
-
     def send_alert(
         self,
         title: str,
@@ -57,7 +51,7 @@ class AlertManager:
             return False
 
         feishu_success = self._send_feishu(title, content, level)
-        email_success = self._send_email(title, content)
+        email_success = self.send_email(title, content)
 
         return feishu_success or email_success
 
@@ -96,8 +90,7 @@ class AlertManager:
             response = requests.post(
                 self.webhook_url,
                 json=message,
-                timeout=10,
-                proxies=self.proxies
+                timeout=10
             )
 
             if response.status_code == 200:

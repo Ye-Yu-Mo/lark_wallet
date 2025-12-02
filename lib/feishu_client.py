@@ -21,12 +21,6 @@ class FeishuClient:
         self.access_token = None
         self.token_expire_time = 0  # Token过期时间戳
 
-        # 代理配置
-        self.proxies = {
-            'http': 'http://127.0.0.1:7890',
-            'https': 'http://127.0.0.1:7890'
-        }
-
     def get_tenant_access_token(self):
         """获取tenant_access_token,带过期检查和自动刷新"""
         # 检查token是否存在且未过期 (提前5分钟刷新)
@@ -41,7 +35,7 @@ class FeishuClient:
             "app_secret": self.app_secret
         }
 
-        response = requests.post(url, headers=headers, json=data, proxies=self.proxies)
+        response = requests.post(url, headers=headers, json=data)
         result = response.json()
 
         if result.get("code") != 0:
@@ -66,7 +60,7 @@ class FeishuClient:
         """
         for attempt in range(max_retries):
             try:
-                response = requests.post(url, headers=headers, json=data, timeout=timeout, proxies=self.proxies)
+                response = requests.post(url, headers=headers, json=data, timeout=timeout)
                 result = response.json()
 
                 # 检查是否需要重试

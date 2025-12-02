@@ -63,6 +63,7 @@ class CryptoSyncTask:
         alert_config = asset_sync.get('alerts', {})
         self.alert_manager = AlertManager(
             webhook_url=alert_config.get('feishu_webhook', ''),
+            email_config=alert_config.get('email'),
             enabled=alert_config.get('enabled', False)
         )
         self.alert_on_failure = alert_config.get('alert_on_failure', True)
@@ -77,6 +78,18 @@ class CryptoSyncTask:
 
         :return: 同步结果统计
         """
+        # 检查是否启用了 Binance 数据源
+        binance_config = self.config.get_asset_sync_config().get('binance', {})
+        if not binance_config.get('enabled', False):
+            logger.info("Binance 数据源未启用, 跳过同步")
+            return {
+                'total': 0,
+                'success': 0,
+                'failed': 0,
+                'errors': [],
+                'message': 'Binance disabled'
+            }
+
         start_time = time.time()
 
         result = {
@@ -88,9 +101,26 @@ class CryptoSyncTask:
 
         # 从飞书读取持仓数据 (用于资产发现和数据补充)
         holdings_data = []
+        symbol_map = {}  # 优化: 建立 symbol -> record_id 映射, 避免重复搜索
         try:
             holdings_data = self.feishu.get_all_holdings()
             logger.info(f"从飞书读取到 {len(holdings_data)} 个持仓记录")
+            
+            # 构建映射
+            for item in holdings_data:
+                record_id = item.get('record_id')
+                fields = item.get('fields', {})
+                
+                # 健壮的提取逻辑 (参考 price_alert.py)
+                code_field = fields.get('资产代码')
+                if isinstance(code_field, list):
+                    code = code_field[0].get('text', '') if code_field else ''
+                else:
+                    code = str(code_field or '')
+                
+                if code and record_id:
+                    symbol_map[code] = record_id
+                    
         except Exception as e:
             logger.warning(f"从飞书读取持仓失败: {e}")
 
@@ -104,9 +134,22 @@ class CryptoSyncTask:
         result['total'] = len(crypto_list)
         logger.info(f"开始同步加密货币, 共 {len(crypto_list)} 个资产")
 
+        # 优化: 批量获取一次余额, 避免在循环中重复调用高开销的 account 接口
+        all_balances = {}
+        try:
+            all_balances = self.binance.get_all_balances()
+            logger.info(f"已缓存账户余额信息, 包含 {len(all_balances)} 个资产")
+        except Exception as e:
+            logger.warning(f"批量获取余额失败, 将尝试单个获取: {e}")
+            all_balances = None
+
         for asset_config in crypto_list:
             try:
-                success = self._sync_asset(asset_config)
+                # 从映射中查找 record_id
+                symbol = asset_config.get('symbol')
+                record_id = symbol_map.get(symbol)
+                
+                success = self._sync_asset(asset_config, all_balances, record_id)
                 if success:
                     result['success'] += 1
                 else:
@@ -185,11 +228,13 @@ class CryptoSyncTask:
                 error_summary=error_summary
             )
 
-    def _sync_asset(self, asset_config: Dict) -> bool:
+    def _sync_asset(self, asset_config: Dict, all_balances: Optional[Dict] = None, record_id: Optional[str] = None) -> bool:
         """
         同步单个资产
 
         :param asset_config: 资产配置
+        :param all_balances: 余额缓存字典 (可选)
+        :param record_id: 飞书记录ID (可选, 避免重复搜索)
         :return: 是否成功
         """
         symbol = asset_config.get('symbol')  # 如 'DOGE'
@@ -216,18 +261,19 @@ class CryptoSyncTask:
                 return False
 
         # 2. 获取交易量 (可选)
+        # 优化: SimpleBinanceClient 的 get_ticker_info 实现是虚假的(不返回volume), 且会重复请求价格
+        # 因此这里直接跳过, 除非需要真正的 volume 数据 (需要升级 Client)
         volume = None
-        try:
-            ticker = self.binance.get_ticker_info(trading_pair)
-            if ticker:
-                volume = ticker.get('volume')
-        except Exception as e:
-            logger.warning(f"获取交易量失败: {trading_pair} - {e}")
 
         # 3. 获取实际持仓余额 (如果启用了 API 权限)
         actual_balance = None
         try:
-            actual_balance = self.binance.get_balance(symbol)
+            if all_balances is not None:
+                # 使用缓存 (注意: Binance返回的key通常是大写)
+                actual_balance = all_balances.get(symbol.upper(), 0.0)
+            else:
+                # 降级为单独获取
+                actual_balance = self.binance.get_balance(symbol)
         except Exception as e:
             logger.warning(f"获取持仓余额失败: {symbol} - {e}")
 
@@ -289,7 +335,8 @@ class CryptoSyncTask:
                 self.feishu,
                 self.db,
                 symbol,
-                feishu_data
+                feishu_data,
+                record_id  # 传入 record_id
             )
 
             if blocked_fields:

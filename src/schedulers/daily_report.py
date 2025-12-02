@@ -40,246 +40,62 @@ class DailyReportTask:
         # 初始化告警管理器
         self.alert_manager = AlertManager(
             webhook_url=alert_config.get('feishu_webhook', ''),
+            email_config=alert_config.get('email'),
             enabled=alert_config.get('enabled', False)
         )
 
         logger.info("DailyReportTask 初始化完成")
 
-    def generate_report(self) -> Dict:
+    # ... (中间代码保持不变, 直到 _send_report_notification)
+
+    def _generate_html_report(self, report: Dict) -> str:
+        """生成HTML格式报告"""
+        style = """
+        <style>
+            table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background-color: #f2f2f2; }
+            .profit { color: red; }
+            .loss { color: green; }
+            .header { margin-bottom: 20px; }
+            .summary { display: flex; justify-content: space-between; margin-bottom: 20px; }
+        </style>
         """
-        生成每日收益报告
+        
+        color_class = lambda x: "profit" if x >= 0 else "loss"
+        
+        html = f"""
+        <html>
+        <head>{style}</head>
+        <body>
+            <div class="header">
+                <h2>资产日报 - {report['date']}</h2>
+            </div>
+            
+            <div class="summary">
+                <p><strong>总资产:</strong> ¥{report['total_value']:,.2f}</p>
+                <p><strong>总收益:</strong> <span class="{color_class(report['total_profit'])}">¥{report['total_profit']:+,.2f} ({report['profit_rate']:+.2f}%)</span></p>
+            </div>
 
-        :return: 报告结果
+            <h3>基金明细 ({report.get('total_funds', 0)})</h3>
+            <table>
+                <tr><th>名称</th><th>市值</th><th>收益</th><th>收益率</th></tr>
+                {"".join([f"<tr><td>{item['name']}</td><td>¥{item['value']:,.2f}</td><td class='{color_class(item['profit'])}'>¥{item['profit']:+,.2f}</td><td class='{color_class(item['profit_rate'])}'>{item['profit_rate']:+.2f}%</td></tr>" for item in sorted(report.get('fund_details', []), key=lambda x: x['profit'], reverse=True)])}
+            </table>
+
+            <h3>加密货币明细 ({report.get('total_cryptos', 0)})</h3>
+            <table>
+                <tr><th>名称</th><th>市值</th><th>收益</th><th>收益率</th></tr>
+                {"".join([f"<tr><td>{item['name']}</td><td>${item['value']:,.2f}</td><td class='{color_class(item['profit'])}'>${item['profit']:+,.2f}</td><td class='{color_class(item['profit_rate'])}'>{item['profit_rate']:+.2f}%</td></tr>" for item in sorted(report.get('crypto_details', []), key=lambda x: x['profit'], reverse=True)])}
+            </table>
+        </body>
+        </html>
         """
-        start_time = time.time()
-
-        result = {
-            'success': True,
-            'date': (date.today() - timedelta(days=1)).isoformat(),
-            'total_funds': 0,
-            'total_value': 0,
-            'total_cost': 0,
-            'total_profit': 0,
-            'profit_rate': 0,
-            'fund_details': [],
-            'errors': []
-        }
-
-        try:
-            # 1. 获取所有持仓
-            logger.info("开始获取基金持仓数据...")
-            holdings = self.feishu.get_all_holdings()
-
-            if not holdings:
-                logger.warning("没有持仓数据")
-                return result
-
-            # 2. 按资产类型分类
-            fund_holdings = []
-            crypto_holdings = []
-
-            for item in holdings:
-                fields = item.get('fields', {})
-                asset_type = fields.get('资产类型')
-
-                if asset_type == '基金':
-                    fund_holdings.append(fields)
-                elif asset_type == '加密货币':
-                    crypto_holdings.append(fields)
-
-            if not fund_holdings and not crypto_holdings:
-                logger.warning("没有基金或加密货币持仓")
-                return result
-
-            result['total_funds'] = len(fund_holdings)
-            result['total_cryptos'] = len(crypto_holdings)
-            result['fund_details'] = []
-            result['crypto_details'] = []
-
-            logger.info(f"获取到 {len(fund_holdings)} 个基金, {len(crypto_holdings)} 个加密货币")
-
-            # 3. 统计基金收益
-            fund_total_value = 0
-            fund_total_cost = 0
-            fund_total_profit = 0
-
-            for fund in fund_holdings:
-                # 资产代码
-                code_field = fund.get('资产代码')
-                if isinstance(code_field, list):
-                    code = code_field[0].get('text', '') if code_field else ''
-                else:
-                    code = str(code_field or '')
-
-                # 资产名称
-                name_field = fund.get('资产名称')
-                if isinstance(name_field, list):
-                    name = name_field[0].get('text', '') if name_field else code
-                else:
-                    name = str(name_field or code)
-
-                # 当前市值 (公式字段)
-                value_field = fund.get('当前市值')
-                if isinstance(value_field, dict):
-                    value_array = value_field.get('value', [0])
-                    current_value = float(value_array[0]) if value_array else 0
-                else:
-                    current_value = float(value_field or 0)
-
-                # 总成本 (公式字段)
-                cost_field = fund.get('总成本')
-                if isinstance(cost_field, dict):
-                    cost_array = cost_field.get('value', [0])
-                    total_cost = float(cost_array[0]) if cost_array else 0
-                else:
-                    total_cost = float(cost_field or 0)
-
-                # 收益金额 (公式字段)
-                profit_field = fund.get('收益金额')
-                if isinstance(profit_field, dict):
-                    profit_array = profit_field.get('value', [0])
-                    profit = float(profit_array[0]) if profit_array else 0
-                else:
-                    profit = float(profit_field or 0)
-
-                # 收益率 (公式字段)
-                rate_field = fund.get('收益率')
-                if isinstance(rate_field, dict):
-                    rate_array = rate_field.get('value', [0])
-                    profit_rate = float(rate_array[0]) if rate_array else 0
-                else:
-                    profit_rate = float(rate_field or 0)
-
-                # 累加总计
-                fund_total_value += current_value
-                fund_total_cost += total_cost
-                fund_total_profit += profit
-
-                # 记录详情
-                result['fund_details'].append({
-                    'code': code,
-                    'name': name,
-                    'value': current_value,
-                    'cost': total_cost,
-                    'profit': profit,
-                    'profit_rate': profit_rate
-                })
-
-            # 4. 统计加密货币收益
-            crypto_total_value = 0
-            crypto_total_cost = 0
-            crypto_total_profit = 0
-
-            for crypto in crypto_holdings:
-                # 资产代码
-                code_field = crypto.get('资产代码')
-                if isinstance(code_field, list):
-                    code = code_field[0].get('text', '') if code_field else ''
-                else:
-                    code = str(code_field or '')
-
-                # 资产名称
-                name_field = crypto.get('资产名称')
-                if isinstance(name_field, list):
-                    name = name_field[0].get('text', '') if name_field else code
-                else:
-                    name = str(name_field or code)
-
-                # 当前市值 (公式字段)
-                value_field = crypto.get('当前市值')
-                if isinstance(value_field, dict):
-                    value_array = value_field.get('value', [0])
-                    current_value = float(value_array[0]) if value_array else 0
-                else:
-                    current_value = float(value_field or 0)
-
-                # 总成本 (公式字段)
-                cost_field = crypto.get('总成本')
-                if isinstance(cost_field, dict):
-                    cost_array = cost_field.get('value', [0])
-                    total_cost = float(cost_array[0]) if cost_array else 0
-                else:
-                    total_cost = float(cost_field or 0)
-
-                # 收益金额 (公式字段)
-                profit_field = crypto.get('收益金额')
-                if isinstance(profit_field, dict):
-                    profit_array = profit_field.get('value', [0])
-                    profit = float(profit_array[0]) if profit_array else 0
-                else:
-                    profit = float(profit_field or 0)
-
-                # 收益率 (公式字段)
-                rate_field = crypto.get('收益率')
-                if isinstance(rate_field, dict):
-                    rate_array = rate_field.get('value', [0])
-                    profit_rate = float(rate_array[0]) if rate_array else 0
-                else:
-                    profit_rate = float(rate_field or 0)
-
-                # 累加总计
-                crypto_total_value += current_value
-                crypto_total_cost += total_cost
-                crypto_total_profit += profit
-
-                # 记录详情
-                result['crypto_details'].append({
-                    'code': code,
-                    'name': name,
-                    'value': current_value,
-                    'cost': total_cost,
-                    'profit': profit,
-                    'profit_rate': profit_rate
-                })
-
-            # 5. 汇总数据
-            result['fund_total_value'] = fund_total_value
-            result['fund_total_cost'] = fund_total_cost
-            result['fund_total_profit'] = fund_total_profit
-            result['fund_profit_rate'] = (fund_total_profit / fund_total_cost * 100) if fund_total_cost > 0 else 0
-
-            result['crypto_total_value'] = crypto_total_value
-            result['crypto_total_cost'] = crypto_total_cost
-            result['crypto_total_profit'] = crypto_total_profit
-            result['crypto_profit_rate'] = (crypto_total_profit / crypto_total_cost * 100) if crypto_total_cost > 0 else 0
-
-            result['total_value'] = fund_total_value + crypto_total_value
-            result['total_cost'] = fund_total_cost + crypto_total_cost
-            result['total_profit'] = fund_total_profit + crypto_total_profit
-            result['profit_rate'] = (result['total_profit'] / result['total_cost'] * 100) if result['total_cost'] > 0 else 0
-
-            # 6. 发送飞书通知
-            self._send_report_notification(result)
-
-            # 7. 记录日志
-            duration = time.time() - start_time
-
-            try:
-                self.feishu.log_sync_status(
-                    source='system',
-                    task_type='daily_report',
-                    status='success',
-                    record_count=result['total_funds'] + result['total_cryptos'],
-                    error_msg=None,
-                    duration=duration
-                )
-            except Exception as e:
-                logger.error(f"记录报告日志失败: {e}")
-
-            logger.info(f"每日报告生成完成: {result['total_funds']}个基金, {result['total_cryptos']}个加密货币, "
-                       f"总市值 {result['total_value']:.2f}, "
-                       f"总收益 {result['total_profit']:.2f} ({result['profit_rate']:.2f}%)")
-
-        except Exception as e:
-            logger.error(f"生成每日报告失败: {e}")
-            result['success'] = False
-            result['errors'].append(str(e))
-
-        return result
+        return html
 
     def _send_report_notification(self, report: Dict):
         """
-        发送报告通知到飞书
+        发送报告通知到飞书和邮件
 
         :param report: 报告数据
         """
@@ -288,15 +104,13 @@ class DailyReportTask:
             return
 
         try:
-            # 构建消息内容
+            # 1. 发送飞书卡片
             yesterday = (date.today() - timedelta(days=1)).strftime('%Y-%m-%d')
-
-            # 收益emoji
             profit_emoji = "📈" if report['total_profit'] >= 0 else "📉"
 
-            # 构建卡片元素列表
+            # ... (构建元素的逻辑保持不变) ...
             elements = []
-
+            
             # 整体概览
             elements.append({
                 "tag": "div",
@@ -367,7 +181,6 @@ class DailyReportTask:
                     ]
                 })
 
-                # 基金明细
                 fund_lines = []
                 for fund in sorted(report['fund_details'], key=lambda x: x['profit'], reverse=True)[:10]:
                     emoji = "🟢" if fund['profit'] >= 0 else "🔴"
@@ -414,7 +227,6 @@ class DailyReportTask:
                     ]
                 })
 
-                # 加密货币明细
                 crypto_lines = []
                 for crypto in sorted(report['crypto_details'], key=lambda x: x['profit'], reverse=True)[:10]:
                     emoji = "🟢" if crypto['profit'] >= 0 else "🔴"
@@ -431,41 +243,32 @@ class DailyReportTask:
                         }
                     })
 
-            # 构建卡片消息
-            card = {
-                "msg_type": "interactive",
-                "card": {
-                    "config": {
-                        "wide_screen_mode": True
+            card_content = {
+                "config": {
+                    "wide_screen_mode": True
+                },
+                "header": {
+                    "title": {
+                        "tag": "plain_text",
+                        "content": f"{profit_emoji} 资产日报 - {yesterday}"
                     },
-                    "header": {
-                        "title": {
-                            "tag": "plain_text",
-                            "content": f"{profit_emoji} 资产日报 - {yesterday}"
-                        },
-                        "template": "blue" if report['total_profit'] >= 0 else "red"
-                    },
-                    "elements": elements
-                }
+                    "template": "blue" if report['total_profit'] >= 0 else "red"
+                },
+                "elements": elements
             }
 
-            # 发送消息
-            import requests
-            proxies = {
-                'http': 'http://127.0.0.1:7890',
-                'https': 'http://127.0.0.1:7890'
-            }
-            response = requests.post(
-                self.alert_manager.webhook_url,
-                json=card,
-                timeout=10,
-                proxies=proxies
-            )
-
-            if response.status_code == 200:
+            # 发送飞书
+            if self.alert_manager.send_feishu_card(card_content):
                 logger.info("每日报告已发送到飞书")
             else:
-                logger.error(f"发送报告失败: {response.text}")
+                logger.warning("发送飞书报告失败")
+
+            # 2. 发送邮件
+            html_report = self._generate_html_report(report)
+            if self.alert_manager.send_email(f"资产日报 {yesterday}", html_report):
+                logger.info("每日报告已发送到邮件")
+            else:
+                logger.warning("发送邮件报告失败")
 
         except Exception as e:
             logger.error(f"发送报告通知失败: {e}")

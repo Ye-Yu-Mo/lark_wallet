@@ -52,6 +52,7 @@ class PriceAlertTask:
         # 初始化告警管理器
         self.alert_manager = AlertManager(
             webhook_url=alert_config.get('feishu_webhook', ''),
+            email_config=alert_config.get('email'),
             enabled=alert_config.get('enabled', False)
         )
 

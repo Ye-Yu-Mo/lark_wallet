@@ -9,10 +9,13 @@ def prepare_holdings_payload(
     feishu: AssetFeishuClient,
     database: AssetDB,
     symbol: str,
-    payload: Dict
+    payload: Dict,
+    record_id: Optional[str] = None
 ) -> Tuple[Optional[str], Dict, List[str]]:
     """根据飞书手动修改记录过滤掉需要保护的字段"""
-    record_id = feishu.get_holding_record_id(symbol)
+    if not record_id:
+        record_id = feishu.get_holding_record_id(symbol)
+    
     sanitized_payload = dict(payload)
 
     if not record_id:

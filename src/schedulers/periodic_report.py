@@ -45,6 +45,7 @@ class PeriodicReportTask:
         # 初始化告警管理器
         self.alert_manager = AlertManager(
             webhook_url=alert_config.get('feishu_webhook', ''),
+            email_config=alert_config.get('email'),
             enabled=alert_config.get('enabled', False)
         )
 
@@ -412,9 +413,67 @@ class PeriodicReportTask:
             logger.debug(f"计算 {symbol} 期间涨跌幅失败: {e}")
             return None
 
+    def _generate_html_report(self, report: Dict, period_name: str) -> str:
+        """生成HTML格式报告"""
+        style = """
+        <style>
+            table { border-collapse: collapse; width: 100%; margin-bottom: 20px; }
+            th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+            th { background-color: #f2f2f2; }
+            .profit { color: red; }
+            .loss { color: green; }
+            .header { margin-bottom: 20px; }
+            .summary { display: flex; justify-content: space-between; margin-bottom: 20px; }
+        </style>
+        """
+        
+        color_class = lambda x: "profit" if x >= 0 else "loss"
+        
+        html = f"""
+        <html>
+        <head>{style}</head>
+        <body>
+            <div class="header">
+                <h2>资产{period_name} - {date.today()}</h2>
+            </div>
+            
+            <div class="summary">
+                <p><strong>总资产:</strong> ¥{report['total_value']:,.2f}</p>
+                <p><strong>总收益:</strong> <span class="{color_class(report['total_profit'])}">¥{report['total_profit']:+,.2f} ({report['profit_rate']:+.2f}%)</span></p>
+                <p><strong>期间平均涨跌:</strong> <span class="{color_class(report['period_change_rate'])}">{report['period_change_rate']:+.2f}%</span></p>
+            </div>
+
+            <h3>最佳表现 Top 5</h3>
+            <table>
+                <tr><th>名称</th><th>类型</th><th>期间涨跌幅</th><th>收益率</th></tr>
+                {"".join([f"<tr><td>{item['name']}</td><td>{item['type']}</td><td class='{color_class(item['period_change_rate'])}'>{item['period_change_rate']:+.2f}%</td><td class='{color_class(item['profit_rate'])}'>{item['profit_rate']:+.2f}%</td></tr>" for item in report.get('top_performers', [])])}
+            </table>
+
+            <h3>最差表现 Top 5</h3>
+            <table>
+                <tr><th>名称</th><th>类型</th><th>期间涨跌幅</th><th>收益率</th></tr>
+                {"".join([f"<tr><td>{item['name']}</td><td>{item['type']}</td><td class='{color_class(item['period_change_rate'])}'>{item['period_change_rate']:+.2f}%</td><td class='{color_class(item['profit_rate'])}'>{item['profit_rate']:+.2f}%</td></tr>" for item in report.get('worst_performers', [])])}
+            </table>
+
+            <h3>基金明细</h3>
+            <table>
+                <tr><th>名称</th><th>市值</th><th>收益</th><th>收益率</th><th>期间涨跌</th></tr>
+                {"".join([f"<tr><td>{item['name']}</td><td>¥{item['value']:,.2f}</td><td class='{color_class(item['profit'])}'>¥{item['profit']:+,.2f}</td><td class='{color_class(item['profit_rate'])}'>{item['profit_rate']:+.2f}%</td><td class='{color_class(item['period_change_rate'])}'>{item['period_change_rate']:+.2f}%</td></tr>" for item in report.get('fund_performance', [])])}
+            </table>
+
+            <h3>加密货币明细</h3>
+            <table>
+                <tr><th>名称</th><th>市值</th><th>收益</th><th>收益率</th><th>期间涨跌</th></tr>
+                {"".join([f"<tr><td>{item['name']}</td><td>${item['value']:,.2f}</td><td class='{color_class(item['profit'])}'>${item['profit']:+,.2f}</td><td class='{color_class(item['profit_rate'])}'>{item['profit_rate']:+.2f}%</td><td class='{color_class(item['period_change_rate'])}'>{item['period_change_rate']:+.2f}%</td></tr>" for item in report.get('crypto_performance', [])])}
+            </table>
+        </body>
+        </html>
+        """
+        return html
+
     def _send_report_notification(self, report: Dict, period: str):
         """
-        发送报告通知到飞书
+        发送报告通知到飞书和邮件
 
         :param report: 报告数据
         :param period: 周期类型
@@ -424,16 +483,13 @@ class PeriodicReportTask:
             return
 
         try:
-            # 标题
             period_name = "周报" if period == 'week' else "月报"
             today = date.today().strftime('%Y-%m-%d')
-
-            # 收益emoji
             profit_emoji = "📈" if report['total_profit'] >= 0 else "📉"
 
-            # 构建卡片元素列表
+            # ... (构建飞书卡片元素的逻辑保持不变) ...
             elements = []
-
+            
             # 整体概览
             elements.append({
                 "tag": "div",
@@ -598,41 +654,32 @@ class PeriodicReportTask:
                     }
                 })
 
-            # 构建卡片消息
-            card = {
-                "msg_type": "interactive",
-                "card": {
-                    "config": {
-                        "wide_screen_mode": True
+            card_content = {
+                "config": {
+                    "wide_screen_mode": True
+                },
+                "header": {
+                    "title": {
+                        "tag": "plain_text",
+                        "content": f"{profit_emoji} 资产{period_name} - {today}"
                     },
-                    "header": {
-                        "title": {
-                            "tag": "plain_text",
-                            "content": f"{profit_emoji} 资产{period_name} - {today}"
-                        },
-                        "template": "blue" if report['total_profit'] >= 0 else "red"
-                    },
-                    "elements": elements
-                }
+                    "template": "blue" if report['total_profit'] >= 0 else "red"
+                },
+                "elements": elements
             }
 
-            # 发送消息
-            import requests
-            proxies = {
-                'http': 'http://127.0.0.1:7890',
-                'https': 'http://127.0.0.1:7890'
-            }
-            response = requests.post(
-                self.alert_manager.webhook_url,
-                json=card,
-                timeout=10,
-                proxies=proxies
-            )
-
-            if response.status_code == 200:
+            # 1. 发送飞书卡片
+            if self.alert_manager.send_feishu_card(card_content):
                 logger.info(f"{period_name}已发送到飞书")
             else:
-                logger.error(f"发送{period_name}失败: {response.text}")
+                logger.warning(f"发送{period_name}飞书失败")
+            
+            # 2. 发送邮件报告
+            html_report = self._generate_html_report(report, period_name)
+            if self.alert_manager.send_email(f"资产{period_name} {today}", html_report):
+                logger.info(f"{period_name}已发送到邮件")
+            else:
+                logger.warning(f"发送{period_name}邮件失败")
 
         except Exception as e:
             logger.error(f"发送{period_name}通知失败: {e}")

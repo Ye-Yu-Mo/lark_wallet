@@ -82,9 +82,25 @@ class FundSyncTask:
 
         # 从飞书读取持仓数据 (用于资产发现和数据补充)
         holdings_data = []
+        symbol_map = {}  # 优化: 建立 symbol -> record_id 映射
         try:
             holdings_data = self.feishu.get_all_holdings()
             logger.info(f"从飞书读取到 {len(holdings_data)} 个持仓记录")
+            
+            # 构建映射
+            for item in holdings_data:
+                record_id = item.get('record_id')
+                fields = item.get('fields', {})
+                
+                code_field = fields.get('资产代码')
+                if isinstance(code_field, list):
+                    code = code_field[0].get('text', '') if code_field else ''
+                else:
+                    code = str(code_field or '')
+                
+                if code and record_id:
+                    symbol_map[code] = record_id
+                    
         except Exception as e:
             logger.warning(f"从飞书读取持仓失败: {e}")
 
@@ -101,7 +117,11 @@ class FundSyncTask:
 
         for fund_config in fund_list:
             try:
-                success = self._sync_fund(fund_config)
+                # 从映射中查找 record_id
+                symbol = fund_config.get('symbol')
+                record_id = symbol_map.get(symbol)
+                
+                success = self._sync_fund(fund_config, record_id)
                 if success:
                     result['success'] += 1
                 else:
@@ -142,11 +162,12 @@ class FundSyncTask:
 
         return result
 
-    def _sync_fund(self, fund_config: Dict) -> bool:
+    def _sync_fund(self, fund_config: Dict, record_id: Optional[str] = None) -> bool:
         """
         同步单只基金
 
         :param fund_config: 基金配置
+        :param record_id: 飞书记录ID (可选)
         :return: 是否成功
         """
         symbol = fund_config.get('symbol')  # 如 'SH510300'
@@ -231,7 +252,8 @@ class FundSyncTask:
                 self.feishu,
                 self.db,
                 symbol,
-                feishu_data
+                feishu_data,
+                record_id  # 传入 record_id
             )
 
             if blocked_fields:

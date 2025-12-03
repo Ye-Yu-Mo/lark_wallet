@@ -117,7 +117,8 @@ class AlipayParser:
                     "日期": int(dt.timestamp() * 1000),
                     "收支": '收入' if is_income else '支出',
                     "分类": mapped_category,
-                    "金额": amount
+                    "金额": amount,
+                    "交易对方": SmartCategorizer._clean_counterparty(counterparty)[:50] # 添加原始交易对方, 并做基础清理
                 })
 
             except Exception as e:
@@ -195,7 +196,8 @@ class WechatParser:
                         "日期": int(dt.timestamp() * 1000),
                         "收支": '收入' if is_income else '支出',
                         "分类": mapped_category,
-                        "金额": amount
+                        "金额": amount,
+                        "交易对方": SmartCategorizer._clean_counterparty(counterparty)[:50] # 添加原始交易对方
                     })
 
                 except Exception as e:

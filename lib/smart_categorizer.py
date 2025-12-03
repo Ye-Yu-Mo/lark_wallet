@@ -2,12 +2,17 @@
 智能分类器
 根据交易对方和交易类型智能识别分类
 """
-
+import json
+import os
+from typing import Dict, Any, Optional
 
 class SmartCategorizer:
     """智能分类器"""
 
-    # 关键词映射规则
+    CORRECTIONS_FILE = os.path.join(os.path.dirname(__file__), 'corrections.json')
+    _corrections: Dict[str, str] = {} # Class-level attribute to store corrections
+
+    # 关键词映射规则 (保持不变)
     KEYWORD_RULES = {
         '餐饮': [
             '餐', '饭', '食', '吃', '外卖', '美团', '饿了么', '麦当劳', '肯德基',
@@ -77,12 +82,12 @@ class SmartCategorizer:
             '贷款', '花呗', '借呗', '信用卡', '分期', '中融小额贷款'
         ],
         '其他收入': [
-            '工资', '奖金', '报销', '退税', '理财', '股票', '基金', '利息',
+            '工资', '薪水', '奖金', '报销', '退税', '理财', '股票', '基金', '利息',
             '分红', '佣金', '稿费', '兼职', '补贴', '红包收入'
         ]
     }
 
-    # 特殊交易对方映射(精确匹配优先)
+    # 特殊交易对方映射(精确匹配优先) (保持不变)
     EXACT_MERCHANT_MAP = {
         # 家庭支出
         '笨蛋蛋🥚': '家庭支出',
@@ -150,7 +155,7 @@ class SmartCategorizer:
         'SAEBYOUL HEYYO': '餐饮',
     }
 
-    # 支付宝分类映射
+    # 支付宝分类映射 (保持不变)
     ALIPAY_CATEGORY_MAP = {
         '餐饮美食': '餐饮',
         '交通出行': '交通',
@@ -171,7 +176,7 @@ class SmartCategorizer:
         '其他': '其他'
     }
 
-    # 微信分类映射
+    # 微信分类映射 (保持不变)
     WECHAT_CATEGORY_MAP = {
         '商户消费': '购物',
         '扫二维码付款': '餐饮',
@@ -183,6 +188,59 @@ class SmartCategorizer:
     }
 
     @classmethod
+    def _clean_counterparty(cls, counterparty: str) -> str:
+        """
+        清理交易对方名称, 移除括号内容和特殊字符
+        """
+        if not counterparty:
+            return ''
+        clean_counterparty = counterparty.split('(')[0].split('（')[0].strip()
+        clean_counterparty = clean_counterparty.replace('*', '').strip()
+        return clean_counterparty
+
+    @classmethod
+    def _load_corrections(cls):
+        """从 corrections.json 加载修正数据"""
+        if not os.path.exists(cls.CORRECTIONS_FILE):
+            # If file doesn't exist, initialize empty corrections and return
+            cls._corrections = {}
+            return
+
+        try:
+            with open(cls.CORRECTIONS_FILE, 'r', encoding='utf-8') as f:
+                content = f.read()
+                if not content: # Handle empty file case
+                    cls._corrections = {}
+                else:
+                    cls._corrections = json.loads(content)
+        except json.JSONDecodeError:
+            print(f"Warning: {cls.CORRECTIONS_FILE} is malformed. Initializing empty corrections.")
+            cls._corrections = {}
+        except Exception as e:
+            print(f"Error loading {cls.CORRECTIONS_FILE}: {e}. Initializing empty corrections.")
+            cls._corrections = {}
+
+    @classmethod
+    def _save_corrections(cls):
+        """保存修正数据到 corrections.json"""
+        try:
+            with open(cls.CORRECTIONS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(cls._corrections, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error saving {cls.CORRECTIONS_FILE}: {e}")
+
+    @classmethod
+    def add_correction(cls, counterparty: str, final_category: str):
+        """
+        添加或更新一个修正记录。
+        这应该由外部调用，当用户手动修正了一个分类时。
+        """
+        cleaned_counterparty = cls._clean_counterparty(counterparty)
+        if cleaned_counterparty:
+            cls._corrections[cleaned_counterparty] = final_category
+            cls._save_corrections()
+
+    @classmethod
     def categorize(cls, source_type, category, counterparty, is_income):
         """
         智能分类
@@ -192,6 +250,11 @@ class SmartCategorizer:
         :param is_income: 是否收入
         :return: 分类结果
         """
+        # 1. 优先检查修正记录
+        cleaned_counterparty = cls._clean_counterparty(counterparty)
+        if cleaned_counterparty and cleaned_counterparty in cls._corrections:
+            return cls._corrections[cleaned_counterparty]
+
         # 收入类型单独处理
         if is_income:
             # 检查关键词
@@ -200,27 +263,24 @@ class SmartCategorizer:
                     return '其他收入'
             return '工作收入'
 
-        # 1. 优先精确匹配交易对方
-        if counterparty in cls.EXACT_MERCHANT_MAP:
+        # 2. 优先精确匹配交易对方 (从原有逻辑中迁移，并使用清理后的交易对方)
+        if counterparty in cls.EXACT_MERCHANT_MAP: # Use original counterparty for exact map
             return cls.EXACT_MERCHANT_MAP[counterparty]
 
-        # 2. 尝试基于原始分类映射
+        # 3. 尝试基于原始分类映射
+        mapped = None
         if source_type == 'alipay':
             for key, val in cls.ALIPAY_CATEGORY_MAP.items():
                 if key in category:
                     mapped = val
                     break
-            else:
-                mapped = None
         else:  # wechat
             for key, val in cls.WECHAT_CATEGORY_MAP.items():
                 if key in category:
                     mapped = val
                     break
-            else:
-                mapped = None
 
-        # 3. 基于交易对方关键词进行二次分类
+        # 4. 基于交易对方关键词进行二次分类
         combined_text = f"{category} {counterparty}"
         keyword_match = None
         max_matches = 0
@@ -234,11 +294,11 @@ class SmartCategorizer:
                 max_matches = matches
                 keyword_match = cat
 
-        # 4. 如果关键词匹配置信度高,使用关键词分类
+        # 5. 如果关键词匹配置信度高,使用关键词分类
         if max_matches >= 2 or (max_matches >= 1 and not mapped):
             return keyword_match
 
-        # 5. 否则使用原始分类映射结果
+        # 6. 否则使用原始分类映射结果
         return mapped if mapped else '其他'
 
     @classmethod
@@ -250,13 +310,7 @@ class SmartCategorizer:
         :param final_category: 最终分类
         :return: 备注文本
         """
-        # 清理交易对方
-        if not counterparty or counterparty in ['/', 'nan', '']:
-            return category[:50]
-
-        # 移除括号内容和特殊字符
-        clean_counterparty = counterparty.split('(')[0].split('（')[0].strip()
-        clean_counterparty = clean_counterparty.replace('*', '').strip()
+        clean_counterparty = cls._clean_counterparty(counterparty) # Reuse clean_counterparty
 
         # 如果交易对方太长,截取关键部分
         if len(clean_counterparty) > 15:
@@ -269,3 +323,6 @@ class SmartCategorizer:
             note = category
 
         return note[:50]
+
+# Load corrections when the class is imported
+SmartCategorizer._load_corrections()

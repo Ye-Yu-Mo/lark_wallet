@@ -34,4 +34,4 @@ build-backend = "hatchling.build"
 packages = ["src/core", "src/datasources", "src/schedulers", "src/utils"]
 
 [dependency-groups]
-dev = []
+dev = ["pytest>=7.0.0"]

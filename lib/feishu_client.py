@@ -48,19 +48,28 @@ class FeishuClient:
 
         return self.access_token
 
-    def _api_call_with_retry(self, url, headers, data, max_retries=3, timeout=30):
+    def _api_call_with_retry(self, url, headers, data, method='POST', max_retries=3, timeout=30):
         """
         带重试的API调用
         :param url: API URL
         :param headers: 请求头
         :param data: 请求体
+        :param method: HTTP方法 (POST, PUT, DELETE等)
         :param max_retries: 最大重试次数
         :param timeout: 超时时间
         :return: API响应结果
         """
         for attempt in range(max_retries):
             try:
-                response = requests.post(url, headers=headers, json=data, timeout=timeout)
+                if method.upper() == 'GET':
+                    response = requests.get(url, headers=headers, params=data, timeout=timeout)
+                elif method.upper() == 'PUT':
+                    response = requests.put(url, headers=headers, json=data, timeout=timeout)
+                elif method.upper() == 'DELETE':
+                    response = requests.delete(url, headers=headers, json=data, timeout=timeout)
+                else:
+                    response = requests.post(url, headers=headers, json=data, timeout=timeout)
+
                 result = response.json()
 
                 # 检查是否需要重试
@@ -158,3 +167,144 @@ class FeishuClient:
                 errors.append(f"记录{i}: {str(e)}")
 
         return {"success": success, "failed": failed, "errors": errors}
+
+    def batch_update_records(self, app_token, table_id, records):
+        """
+        批量更新记录
+        :param app_token: 多维表app_token
+        :param table_id: 表table_id
+        :param records: 记录列表,每条记录格式: {"record_id": "xxx", "fields": {...}}
+        :return: 更新结果 {"success": int, "failed": int, "errors": list}
+        """
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/batch_update"
+
+        headers = {
+            "Authorization": f"Bearer {self.get_tenant_access_token()}",
+            "Content-Type": "application/json"
+        }
+
+        data = {
+            "records": records
+        }
+
+        try:
+            # 使用带重试的API调用
+            result = self._api_call_with_retry(url, headers, data)
+
+            if result.get("code") != 0:
+                # 如果批量更新失败,尝试逐条更新
+                return self._fallback_single_update(app_token, table_id, records)
+
+            return {"success": len(records), "failed": 0, "errors": []}
+
+        except Exception as e:
+            # 网络错误等,尝试逐条更新
+            return self._fallback_single_update(app_token, table_id, records)
+
+    def _fallback_single_update(self, app_token, table_id, records):
+        """
+        逐条更新记录(批量失败时的fallback)
+        """
+        success = 0
+        failed = 0
+        errors = []
+
+        for i, record in enumerate(records):
+            try:
+                record_id = record.get("record_id")
+                if not record_id:
+                    failed += 1
+                    errors.append(f"记录{i}: 缺少record_id")
+                    continue
+
+                url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/{record_id}"
+                headers = {
+                    "Authorization": f"Bearer {self.get_tenant_access_token()}",
+                    "Content-Type": "application/json"
+                }
+
+                # 单条更新使用PUT方法
+                result = self._api_call_with_retry(url, headers, {"fields": record["fields"]}, method='PUT', max_retries=2, timeout=10)
+
+                if result.get("code") == 0:
+                    success += 1
+                else:
+                    failed += 1
+                    errors.append(f"记录{i} (id={record_id}): {result.get('msg', 'unknown error')}")
+            except Exception as e:
+                failed += 1
+                errors.append(f"记录{i} (id={record.get('record_id')}): {str(e)}")
+
+        return {"success": success, "failed": failed, "errors": errors}
+
+    def list_fields(self, app_token, table_id):
+        """
+        列出表字段
+        :param app_token: 多维表app_token
+        :param table_id: 表table_id
+        :return: 字段列表
+        """
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/fields"
+        headers = {
+            "Authorization": f"Bearer {self.get_tenant_access_token()}"
+        }
+
+        # 使用分页遍历所有字段
+        all_fields = []
+        page_token = None
+        has_more = True
+
+        while has_more:
+            params = {"page_size": 100}
+            if page_token:
+                params["page_token"] = page_token
+
+            # GET 请求不带 body, 这里的 _api_call_with_retry 需要调整一下或者直接用 requests
+            # 为简单起见，且 list_fields 通常不需要重试太多次，直接用 requests
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            result = response.json()
+
+            if result.get("code") != 0:
+                raise Exception(f"获取字段失败: {result}")
+
+            items = result.get("data", {}).get("items", [])
+            all_fields.extend(items)
+
+            has_more = result.get("data", {}).get("has_more", False)
+            page_token = result.get("data", {}).get("page_token")
+
+        return all_fields
+
+    def list_records(self, app_token, table_id, page_token=None, page_size=500):
+        """
+        列出记录
+        :param app_token: 多维表app_token
+        :param table_id: 表table_id
+        :param page_token: 分页token
+        :param page_size: 每页大小
+        :return: (items, page_token, has_more)
+        """
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records"
+        headers = {
+            "Authorization": f"Bearer {self.get_tenant_access_token()}"
+        }
+        params = {
+            "page_size": page_size
+        }
+        if page_token:
+            params["page_token"] = page_token
+
+        # GET 请求
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        result = response.json()
+
+        if result.get("code") != 0:
+            raise Exception(f"获取记录失败: {result}")
+
+        data = result.get("data", {})
+        return (
+            data.get("items", []),
+            data.get("page_token"),
+            data.get("has_more", False)
+        )
+

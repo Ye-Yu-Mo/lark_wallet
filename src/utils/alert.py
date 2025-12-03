@@ -59,7 +59,7 @@ class AlertManager:
         """向后兼容旧调用,统一走 send_email"""
         return self.send_email(title, content)
 
-    def send_email(self, title: str, content: str) -> bool:
+    def send_email(self, title: str, content: str, recipients: Optional[list] = None) -> bool:
         """发送邮件"""
         if not self.email_sender or not self.email_sender.enabled:
             return False
@@ -77,7 +77,8 @@ class AlertManager:
         return self.email_sender.send(
             subject=f"[{title}] 资产同步通知",
             content=html_content,
-            content_type=content_type
+            content_type=content_type,
+            to_addrs=recipients
         )
 
     def send_feishu_card(self, card_content: Dict) -> bool:

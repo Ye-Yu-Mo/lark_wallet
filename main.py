@@ -25,6 +25,7 @@ from schedulers.asset_distribution_sync import sync_asset_distribution
 from schedulers.daily_report import send_daily_report
 from schedulers.price_alert import check_price_alerts
 from schedulers.periodic_report import generate_weekly_report, generate_monthly_report
+from schedulers.monthly_report import send_monthly_report as send_financial_monthly_report
 from schedulers.milestone_alert import check_milestones
 from schedulers.holding_period_reminder import check_holding_periods
 from schedulers.sync_error_summary import generate_error_summary
@@ -209,7 +210,7 @@ class AssetSyncService:
             )
             logger.info(f"已注册任务: 周报 (每周{day_of_week} {hour:02d}:{minute:02d})")
 
-        # 8. 月报任务 (每月1号早上 9:00)
+        # 8. 资产月报任务 (每月1号早上 9:00)
         monthly_report_config = scheduler_config.get('monthly_report', {})
         if monthly_report_config.get('enabled', False):
             day = monthly_report_config.get('day', 1)
@@ -223,10 +224,25 @@ class AssetSyncService:
                 hour=hour,
                 minute=minute,
                 id='monthly_report',
-                name='月报',
+                name='资产月报',
                 replace_existing=True
             )
-            logger.info(f"已注册任务: 月报 (每月{day}号 {hour:02d}:{minute:02d})")
+            logger.info(f"已注册任务: 资产月报 (每月{day}号 {hour:02d}:{minute:02d})")
+
+            # 8.1 财务收支月报任务 (每月1号早上 10:00)
+            # 复用 asset_sync.scheduler.monthly_report.enabled 开关，或者默认为开启
+            # 为了简单，我们假设只要启用了月报，就同时发财务月报，时间推迟一小时
+            self.scheduler.add_job(
+                func=lambda: send_financial_monthly_report(self.config_path),
+                trigger='cron',
+                day=day,
+                hour=10, # 默认10点发送财务月报
+                minute=0,
+                id='financial_monthly_report',
+                name='财务收支月报',
+                replace_existing=True
+            )
+            logger.info(f"已注册任务: 财务收支月报 (每月{day}号 10:00)")
 
         # 9. 净值里程碑检查任务 (每天快照后10分钟检查)
         milestone_config = scheduler_config.get('milestone_alert', {})
@@ -454,7 +470,7 @@ def main():
     parser.add_argument(
         '--task',
         choices=['crypto', 'fund', 'snapshot', 'distribution', 'report', 'alert',
-                 'weekly', 'monthly', 'milestone', 'holding', 'summary'],
+                 'weekly', 'monthly', 'financial_report', 'milestone', 'holding', 'summary'],
         help='只运行指定任务一次'
     )
 
@@ -482,6 +498,10 @@ def main():
                 result = generate_weekly_report(args.config)
             elif args.task == 'monthly':
                 result = generate_monthly_report(args.config)
+            elif args.task == 'financial_report':
+                # 财务月报不返回 result (或者返回 None)，为了兼容性
+                send_financial_monthly_report(args.config)
+                result = "Finished"
             elif args.task == 'milestone':
                 result = check_milestones(args.config)
             elif args.task == 'holding':

@@ -52,6 +52,11 @@ class Config:
             # 验证data_dir存在
             if not os.path.exists(account['data_dir']):
                 raise ValueError(f"账本'{account_name}'的数据目录不存在: {account['data_dir']}")
+            
+            # 验证report_emails (可选)
+            if 'report_emails' in account:
+                if not isinstance(account['report_emails'], list):
+                    raise ValueError(f"账本'{account_name}'的'report_emails'必须是列表")
 
         # 验证mcp_server配置
         if 'mcp_server' not in self.data:
@@ -242,6 +247,13 @@ class Config:
         """获取飞书备份配置"""
         asset_sync = self.get_asset_sync_config()
         return asset_sync.get('feishu_backup', {'enabled': False})
+
+    def get_deepseek_config(self):
+        """获取DeepSeek配置"""
+        return self.data.get('deepseek', {
+            'base_url': 'https://api.deepseek.com',
+            'model': 'deepseek-chat'
+        })
 
     # ===== 通用方法 =====
 

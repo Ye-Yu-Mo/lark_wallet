@@ -39,22 +39,28 @@ class EmailSender:
             logger.warning("邮件功能已启用，但配置不完整，将无法发送")
             self.enabled = False
 
-    def send(self, subject: str, content: str, content_type: str = 'plain') -> bool:
+    def send(self, subject: str, content: str, content_type: str = 'plain', to_addrs: Optional[List[str]] = None) -> bool:
         """
         发送邮件
 
         :param subject: 邮件主题
         :param content: 邮件内容
         :param content_type: 内容类型 ('plain' 或 'html')
+        :param to_addrs: 收件人列表 (可选, 如果提供则覆盖默认收件人)
         :return: 是否成功
         """
         if not self.enabled:
             return False
 
+        recipients = to_addrs if to_addrs else self.recipients
+        if not recipients:
+            logger.warning("未指定收件人，无法发送邮件")
+            return False
+
         try:
             message = MIMEMultipart()
             message['From'] = self.username
-            message['To'] = ','.join(self.recipients)
+            message['To'] = ','.join(recipients)
             message['Subject'] = Header(subject, 'utf-8')
 
             # 邮件正文
@@ -71,10 +77,10 @@ class EmailSender:
                     server.starttls()
 
             server.login(self.username, self.password)
-            server.sendmail(self.username, self.recipients, message.as_string())
+            server.sendmail(self.username, recipients, message.as_string())
             server.quit()
 
-            logger.info(f"邮件发送成功: {subject}")
+            logger.info(f"邮件发送成功: {subject} (To: {recipients})")
             return True
 
         except Exception as e:

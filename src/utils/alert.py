@@ -55,6 +55,10 @@ class AlertManager:
 
         return feishu_success or email_success
 
+    def _send_email(self, title: str, content: str) -> bool:
+        """向后兼容旧调用,统一走 send_email"""
+        return self.send_email(title, content)
+
     def send_email(self, title: str, content: str) -> bool:
         """发送邮件"""
         if not self.email_sender or not self.email_sender.enabled:

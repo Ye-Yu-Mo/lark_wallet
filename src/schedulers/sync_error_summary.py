@@ -3,7 +3,7 @@
 每日汇总所有同步任务的错误和失败情况
 """
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 from datetime import datetime, timedelta
 from loguru import logger
 
@@ -166,66 +166,52 @@ class SyncErrorSummaryTask:
         return result
 
     def _get_sync_logs(self, start_time: int, end_time: int) -> List[Dict]:
-        """
-        从飞书日志表获取同步记录
-
-        :param start_time: 开始时间戳 (毫秒)
-        :param end_time: 结束时间戳 (毫秒)
-        :return: 日志记录列表
-        """
-        try:
-            # 使用飞书客户端的底层方法获取日志表记录
-            app_token = self.feishu.app_token
-            table_id = self.feishu.logs_table_id
-
-            if not table_id:
-                logger.error("未配置日志表ID")
-                return []
-
-            # 构建查询过滤条件
-            filter_condition = {
-                "conjunction": "and",
-                "conditions": [
-                    {
-                        "field_name": "同步时间",
-                        "operator": "isGreaterEqual",
-                        "value": [str(start_time)]
-                    },
-                    {
-                        "field_name": "同步时间",
-                        "operator": "isLessEqual",
-                        "value": [str(end_time)]
-                    }
-                ]
-            }
-
-            # 调用search接口
-            import requests
-
-            url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search"
-
-            headers = {
-                "Authorization": f"Bearer {self.feishu.get_tenant_access_token()}",
-                "Content-Type": "application/json"
-            }
-
-            body = {
-                "filter": filter_condition,
-                "automatic_fields": True
-            }
-
-            response = requests.post(url, headers=headers, json=body, timeout=10)
-
-            if response.status_code == 200:
-                data = response.json()
-                return data.get('data', {}).get('items', [])
-            else:
-                logger.error(f"获取日志记录失败: {response.text}")
-                return []
-
-        except Exception as e:
-            logger.error(f"获取同步日志失败: {e}")
+        """获取指定时间范围内的同步日志"""
+        if not self.feishu.logs_table_id:
+            logger.error("未配置日志表ID")
             return []
+
+        try:
+            records = self.feishu.fetch_table_records(self.feishu.logs_table_id, page_size=200)
+        except Exception as exc:
+            logger.error(f"获取同步日志失败: {exc}")
+            return []
+
+        filtered: List[Dict] = []
+        for record in records:
+            fields = record.get('fields', {})
+            timestamp = self._parse_timestamp(fields.get('同步时间'))
+            if timestamp is None:
+                continue
+            if start_time <= timestamp <= end_time:
+                filtered.append(record)
+
+        return filtered
+
+    def _parse_timestamp(self, value) -> Optional[int]:
+        """解析飞书字段中的毫秒时间戳"""
+        if value is None:
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            value = value.strip()
+            if value.isdigit():
+                return int(value)
+            # 尝试解析 ISO 日期
+            try:
+                dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                return int(dt.timestamp() * 1000)
+            except Exception:
+                return None
+        if isinstance(value, dict):
+            raw = value.get('value') or value.get('text')
+            return self._parse_timestamp(raw)
+        if isinstance(value, list) and value:
+            return self._parse_timestamp(value[0])
+        return None
 
     def _send_error_summary(self, summary: Dict):
         """

@@ -29,6 +29,7 @@ from schedulers.milestone_alert import check_milestones
 from schedulers.holding_period_reminder import check_holding_periods
 from schedulers.sync_error_summary import generate_error_summary
 from schedulers.feishu_backup import sync_feishu_backup
+from schedulers.feishu_change_review import sync_feishu_change_review
 from utils.backup import create_backup
 from utils.alert import AlertManager
 

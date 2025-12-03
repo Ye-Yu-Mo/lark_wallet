@@ -3,7 +3,7 @@
 统计前一天的基金收益并发送飞书通知
 """
 import time
-from typing import Dict, List
+from typing import Dict, List, Optional
 from datetime import datetime, date, timedelta
 from loguru import logger
 
@@ -46,7 +46,155 @@ class DailyReportTask:
 
         logger.info("DailyReportTask 初始化完成")
 
-    # ... (中间代码保持不变, 直到 _send_report_notification)
+    def generate_report(self) -> Dict:
+        """生成并发送每日报告"""
+        start_time = time.time()
+        report = {
+            'date': (date.today() - timedelta(days=1)).isoformat(),
+            'timestamp': datetime.now().isoformat(),
+            'total_value': 0.0,
+            'total_cost': 0.0,
+            'total_profit': 0.0,
+            'profit_rate': 0.0,
+            'fund_details': [],
+            'crypto_details': [],
+            'total_funds': 0,
+            'total_cryptos': 0,
+            'fund_total_value': 0.0,
+            'fund_total_cost': 0.0,
+            'fund_total_profit': 0.0,
+            'fund_profit_rate': 0.0,
+            'crypto_total_value': 0.0,
+            'crypto_total_cost': 0.0,
+            'crypto_total_profit': 0.0,
+            'crypto_profit_rate': 0.0,
+            'errors': [],
+            'success': True
+        }
+
+        try:
+            holdings = self.feishu.get_all_holdings()
+            if not holdings:
+                report['success'] = False
+                report['errors'].append('飞书持仓表无数据')
+                logger.warning('飞书持仓表为空, 无法生成每日报告')
+                return report
+
+            for item in holdings:
+                fields = item.get('fields', {})
+                asset_type = self._extract_text(fields.get('资产类型')).strip()
+                if not asset_type:
+                    continue
+
+                detail = self._build_asset_detail(fields)
+                if detail is None:
+                    report['errors'].append('缺少资产代码或市值字段')
+                    continue
+
+                if asset_type == '基金':
+                    report['fund_details'].append(detail)
+                    report['fund_total_value'] += detail['value']
+                    report['fund_total_cost'] += detail['cost']
+                    report['fund_total_profit'] += detail['profit']
+                elif asset_type == '加密货币':
+                    report['crypto_details'].append(detail)
+                    report['crypto_total_value'] += detail['value']
+                    report['crypto_total_cost'] += detail['cost']
+                    report['crypto_total_profit'] += detail['profit']
+                else:
+                    continue
+
+            report['total_funds'] = len(report['fund_details'])
+            report['total_cryptos'] = len(report['crypto_details'])
+            report['fund_profit_rate'] = self._calc_rate(report['fund_total_profit'], report['fund_total_cost'])
+            report['crypto_profit_rate'] = self._calc_rate(report['crypto_total_profit'], report['crypto_total_cost'])
+
+            report['total_value'] = report['fund_total_value'] + report['crypto_total_value']
+            report['total_cost'] = report['fund_total_cost'] + report['crypto_total_cost']
+            report['total_profit'] = report['fund_total_profit'] + report['crypto_total_profit']
+            report['profit_rate'] = self._calc_rate(report['total_profit'], report['total_cost'])
+
+            # 发送通知
+            self._send_report_notification(report)
+
+            duration = time.time() - start_time
+            try:
+                self.feishu.log_sync_status(
+                    source='system',
+                    task_type='daily_report',
+                    status='success' if report['success'] else 'failed',
+                    record_count=report['total_funds'] + report['total_cryptos'],
+                    error_msg='; '.join(report['errors']) if report['errors'] else None,
+                    duration=duration
+                )
+            except Exception as exc:
+                logger.error(f"记录每日报告日志失败: {exc}")
+
+        except Exception as exc:
+            report['success'] = False
+            report['errors'].append(str(exc))
+            logger.error(f"生成每日报告失败: {exc}")
+
+        return report
+
+    def _build_asset_detail(self, fields: Dict) -> Optional[Dict]:
+        code = self._extract_text(fields.get('资产代码'))
+        name = self._extract_text(fields.get('资产名称')) or code or '未知资产'
+        if not code and not name:
+            return None
+
+        value = self._parse_number(fields.get('当前市值'))
+        cost = self._parse_number(fields.get('总成本'))
+        profit = self._parse_number(fields.get('收益金额'))
+        profit_rate = self._parse_number(fields.get('收益率'))
+
+        return {
+            'code': code or name,
+            'name': name,
+            'value': value,
+            'cost': cost,
+            'profit': profit,
+            'profit_rate': profit_rate
+        }
+
+    def _extract_text(self, value) -> str:
+        if value is None:
+            return ''
+        if isinstance(value, list):
+            for item in value:
+                text = self._extract_text(item)
+                if text:
+                    return text
+            return ''
+        if isinstance(value, dict):
+            return str(value.get('text') or value.get('name') or value.get('value') or '')
+        return str(value)
+
+    def _parse_number(self, value) -> float:
+        if value is None:
+            return 0.0
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value.replace(',', ''))
+            except ValueError:
+                return 0.0
+        if isinstance(value, dict):
+            raw = value.get('value')
+            if isinstance(raw, list) and raw:
+                return self._parse_number(raw[0])
+            if raw is not None:
+                return self._parse_number(raw)
+            return self._parse_number(value.get('text'))
+        if isinstance(value, list) and value:
+            return self._parse_number(value[0])
+        return 0.0
+
+    def _calc_rate(self, profit: float, cost: float) -> float:
+        if cost == 0:
+            return 0.0
+        return round((profit / cost) * 100, 2)
 
     def _generate_html_report(self, report: Dict) -> str:
         """生成HTML格式报告"""

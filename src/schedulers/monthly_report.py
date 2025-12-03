@@ -11,6 +11,7 @@ from loguru import logger
 
 from core.config import Config
 from lib.feishu_client import FeishuClient
+from core.feishu_client import AssetFeishuClient
 from utils.alert import AlertManager
 from utils.ai_advisor import get_financial_advice
 
@@ -30,6 +31,20 @@ class MonthlyReportTask:
             app_id=mcp_config.get('app_id'),
             app_secret=mcp_config.get('app_secret')
         )
+        
+        # 初始化资产客户端 (用于读取持仓)
+        self.asset_feishu = None
+        if config.is_asset_sync_enabled():
+            try:
+                feishu_conf = config.get_feishu_config()
+                self.asset_feishu = AssetFeishuClient(
+                    app_id=feishu_conf['app_id'],
+                    app_secret=feishu_conf['app_secret'],
+                    app_token=feishu_conf['app_token'],
+                    table_ids=feishu_conf['tables']
+                )
+            except Exception as e:
+                logger.warning(f"初始化资产客户端失败: {e}")
         
         # 初始化告警管理器 (用于发邮件)
         # 注意：这里我们需要全局的 alert 配置来初始化 SMTP
@@ -164,6 +179,41 @@ class MonthlyReportTask:
                     stats['income'] += amount
                     stats['category_income'][category] += amount
             
+            # 3.1 获取资产数据 (仅针对特定账号)
+            # 这里简单写死 'jasxu'，也可以在config里加标记
+            if account_name == 'jasxu' and self.asset_feishu:
+                try:
+                    holdings = self.asset_feishu.get_all_holdings()
+                    total_val = 0.0
+                    total_profit = 0.0
+                    total_cost = 0.0
+                    
+                    for h in holdings:
+                        fields = h.get('fields', {})
+                        # 解析数值 (飞书字段可能是 list/dict/number)
+                        
+                        def parse_num(v):
+                            if isinstance(v, (int, float)): return float(v)
+                            if isinstance(v, list) and v: return parse_num(v[0])
+                            if isinstance(v, dict): return parse_num(v.get('value') or v.get('text'))
+                            return 0.0
+
+                        val = parse_num(fields.get('当前市值'))
+                        profit = parse_num(fields.get('收益金额'))
+                        cost = parse_num(fields.get('总成本'))
+                        
+                        total_val += val
+                        total_profit += profit
+                        total_cost += cost
+                        
+                    stats['asset_total_value'] = total_val
+                    stats['asset_total_profit'] = total_profit
+                    stats['asset_profit_rate'] = (total_profit / total_cost * 100) if total_cost > 0 else 0
+                    logger.info(f"已获取资产数据: 市值 {total_val}, 收益 {total_profit}")
+                    
+                except Exception as e:
+                    logger.error(f"获取资产数据失败: {e}")
+
             # 4. 获取 AI 建议 (新增)
             period_str = f"{period[0]}年{period[1]}月"
             ai_advice = get_financial_advice(self.config, period_str, stats)

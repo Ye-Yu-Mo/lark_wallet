@@ -55,8 +55,10 @@ class XueqiuClient(DataSource):
                     fund_data = fund_result['data']
                     fund_derived = fund_data.get('fund_derived', {})
                     unit_nav = fund_derived.get('unit_nav')  # 单位净值
-                    if unit_nav:
+                    if unit_nav is not None and float(unit_nav) > 0:
                         return float(unit_nav)
+                    if self._is_money_fund(fund_data):
+                        return 1.0
             except:
                 pass
 
@@ -153,11 +155,16 @@ class XueqiuClient(DataSource):
             if fund_result and 'data' in fund_result:
                 fund_data = fund_result['data']
                 fund_derived = fund_data.get('fund_derived', {})
+                unit_nav = fund_derived.get('unit_nav')
+                current = float(unit_nav) if unit_nav and float(unit_nav) > 0 else 0.0
+
+                if current == 0.0 and self._is_money_fund(fund_data):
+                    current = 1.0
 
                 return {
                     'symbol': symbol,
                     'name': fund_data.get('fd_name'),
-                    'current': float(fund_derived.get('unit_nav', 0)),  # 单位净值
+                    'current': current,
                     'percent': float(fund_derived.get('nav_grtd', 0)),  # 日涨跌
                     'chg': 0,
                     'high': 0,
@@ -210,6 +217,32 @@ class XueqiuClient(DataSource):
         :return: ticker信息字典
         """
         return self.get_fund_info(symbol)
+
+    def _is_money_fund(self, fund_data: Dict[str, Any]) -> bool:
+        """根据基金元数据判断是否为货币型基金"""
+        if not fund_data:
+            return False
+
+        candidates = [
+            fund_data.get('fund_type'),
+            fund_data.get('fund_type_desc'),
+            fund_data.get('fd_type'),
+            fund_data.get('category')
+        ]
+
+        for value in candidates:
+            if isinstance(value, str):
+                lowered = value.lower()
+                if 'money' in lowered or '货币' in lowered:
+                    return True
+
+        name = fund_data.get('fd_name') or fund_data.get('name')
+        if isinstance(name, str):
+            for keyword in ('货币', '钱包', '现金', '货基'):
+                if keyword in name:
+                    return True
+
+        return False
 
     def validate_symbol(self, symbol: str) -> bool:
         """

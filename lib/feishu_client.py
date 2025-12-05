@@ -129,13 +129,26 @@ class FeishuClient:
             result = self._api_call_with_retry(url, headers, data)
 
             if result.get("code") != 0:
+                # API调用失败
+                error_msg = result.get("msg", "Unknown error")
+                print(f"批量创建失败: {error_msg}")
+                print(f"完整响应: {result}")
                 # 如果批量创建失败,尝试逐条创建
                 return self._fallback_single_create(app_token, table_id, records)
 
-            return {"success": len(records), "failed": 0, "errors": []}
+            # 检查返回的records数量
+            created_records = result.get("data", {}).get("records", [])
+            if not created_records:
+                # 没有返回创建的记录，可能是静默失败
+                print(f"⚠️  警告: API返回成功但没有创建记录")
+                print(f"完整响应: {result}")
+                return {"success": 0, "failed": len(records), "errors": ["API返回成功但没有创建记录"]}
+
+            return {"success": len(created_records), "failed": 0, "errors": []}
 
         except Exception as e:
             # 网络错误等,尝试逐条创建
+            print(f"批量创建异常: {e}")
             return self._fallback_single_create(app_token, table_id, records)
 
     def _fallback_single_create(self, app_token, table_id, records):
@@ -307,4 +320,92 @@ class FeishuClient:
             data.get("page_token"),
             data.get("has_more", False)
         )
+
+    def search_records(self, app_token, table_id, filter_conditions=None, sort=None, page_size=500, page_token=None):
+        """
+        搜索记录 (带筛选条件)
+        :param app_token: 多维表app_token
+        :param table_id: 表table_id
+        :param filter_conditions: 筛选条件字典
+        :param sort: 排序规则列表
+        :param page_size: 每页大小
+        :param page_token: 分页token
+        :return: 记录列表
+        """
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables/{table_id}/records/search"
+        headers = {
+            "Authorization": f"Bearer {self.get_tenant_access_token()}",
+            "Content-Type": "application/json"
+        }
+
+        body = {
+            "page_size": page_size
+        }
+
+        if filter_conditions:
+            body["filter"] = filter_conditions
+
+        if sort:
+            body["sort"] = sort
+
+        if page_token:
+            body["page_token"] = page_token
+
+        response = requests.post(url, headers=headers, json=body, timeout=30)
+        result = response.json()
+
+        if result.get("code") != 0:
+            raise Exception(f"搜索记录失败: {result}")
+
+        data = result.get("data", {})
+        items = data.get("items", [])
+
+        # 如果有更多页,递归获取
+        if data.get("has_more", False) and data.get("page_token"):
+            next_items = self.search_records(
+                app_token,
+                table_id,
+                filter_conditions,
+                sort,
+                page_size,
+                data.get("page_token")
+            )
+            items.extend(next_items)
+
+        return items
+
+    def create_table(self, app_token, table_name, default_view_name=None, fields=None):
+        """
+        创建数据表
+        :param app_token: 多维表app_token
+        :param table_name: 表名称
+        :param default_view_name: 默认视图名称
+        :param fields: 字段列表
+        :return: 创建结果
+        """
+        url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{app_token}/tables"
+        headers = {
+            "Authorization": f"Bearer {self.get_tenant_access_token()}",
+            "Content-Type": "application/json"
+        }
+
+        body = {
+            "table": {
+                "name": table_name
+            }
+        }
+
+        if default_view_name:
+            body["table"]["default_view_name"] = default_view_name
+
+        if fields:
+            body["table"]["fields"] = fields
+
+        result = self._api_call_with_retry(url, headers, body)
+
+        if result.get("code") != 0:
+            raise Exception(f"创建表失败: {result}")
+
+        return result.get("data", {})
+
 

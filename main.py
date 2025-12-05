@@ -31,6 +31,8 @@ from schedulers.holding_period_reminder import check_holding_periods
 from schedulers.sync_error_summary import generate_error_summary
 from schedulers.feishu_backup import sync_feishu_backup
 from schedulers.feishu_change_review import sync_feishu_change_review
+from schedulers.health_advisor import generate_health_advice
+from schedulers.weight_reminder import check_weight_reminder
 from utils.backup import create_backup
 from utils.alert import AlertManager
 
@@ -174,7 +176,7 @@ class AssetSyncService:
             )
             logger.info(f"已注册任务: 每日报告 (每天 {hour:02d}:{minute:02d})")
 
-        # 6. 价格波动告警任务 (每小时执行一次,在5分钟时)
+        # 6. 价格波动告警任务
         alert_config = scheduler_config.get('price_alert', {})
         if alert_config.get('enabled', False):
             hour = alert_config.get('hour', '*')
@@ -189,7 +191,10 @@ class AssetSyncService:
                 name='价格波动告警',
                 replace_existing=True
             )
-            logger.info(f"已注册任务: 价格波动告警 (每小时 {minute}分)")
+            if hour == '*':
+                logger.info(f"已注册任务: 价格波动告警 (每小时 {minute}分)")
+            else:
+                logger.info(f"已注册任务: 价格波动告警 (每天 {hour:02d}:{minute:02d})")
 
         # 7. 周报任务 (每周一早上 9:00)
         weekly_report_config = scheduler_config.get('weekly_report', {})
@@ -344,12 +349,100 @@ class AssetSyncService:
             )
             logger.info(f"已注册任务: 飞书手动修改审计同步 (每天 {hour:02d}:{minute:02d})")
 
+        # 15. 健康建议任务 (工作日18:00, 休息日11:30和18:00)
+        health_advisor_config = scheduler_config.get('health_advisor', {})
+        if health_advisor_config.get('enabled', False):
+            from chinese_calendar import is_workday as is_cn_workday
+            from datetime import datetime
+
+            # 工作日18:00
+            self.scheduler.add_job(
+                func=lambda: self._conditional_health_advice(True),
+                trigger='cron',
+                day_of_week='mon-fri',
+                hour=18,
+                minute=0,
+                id='health_advisor_workday_evening',
+                name='健康建议(工作日晚)',
+                replace_existing=True
+            )
+            logger.info("已注册任务: 健康建议(工作日晚) (周一至周五 18:00)")
+
+            # 休息日11:30
+            self.scheduler.add_job(
+                func=lambda: self._conditional_health_advice(False),
+                trigger='cron',
+                day_of_week='sat-sun',
+                hour=11,
+                minute=30,
+                id='health_advisor_weekend_noon',
+                name='健康建议(休息日午)',
+                replace_existing=True
+            )
+            logger.info("已注册任务: 健康建议(休息日午) (周六周日 11:30)")
+
+            # 休息日18:00
+            self.scheduler.add_job(
+                func=lambda: self._conditional_health_advice(False),
+                trigger='cron',
+                day_of_week='sat-sun',
+                hour=18,
+                minute=0,
+                id='health_advisor_weekend_evening',
+                name='健康建议(休息日晚)',
+                replace_existing=True
+            )
+            logger.info("已注册任务: 健康建议(休息日晚) (周六周日 18:00)")
+
+        # 16. 体重记录提醒任务 (每天早上7:30)
+        weight_reminder_config = scheduler_config.get('weight_reminder', {})
+        if weight_reminder_config.get('enabled', False):
+            hour = weight_reminder_config.get('hour', 7)
+            minute = weight_reminder_config.get('minute', 30)
+
+            self.scheduler.add_job(
+                func=lambda: check_weight_reminder(self.config_path),
+                trigger='cron',
+                hour=hour,
+                minute=minute,
+                id='weight_reminder',
+                name='体重记录提醒',
+                replace_existing=True
+            )
+            logger.info(f"已注册任务: 体重记录提醒 (每天 {hour:02d}:{minute:02d})")
+
         # 检查是否有任务被注册
         jobs = self.scheduler.get_jobs()
         if not jobs:
             logger.warning("警告: 没有启用任何定时任务")
             logger.warning("请检查 config.json 中的 asset_sync.scheduler 配置")
             logger.warning("enabled 字段需要设置为 true")
+
+    def _conditional_health_advice(self, is_workday: bool):
+        """
+        根据实际情况决定是否发送健康建议
+
+        :param is_workday: 预期是否工作日
+        """
+        try:
+            from chinese_calendar import is_workday as is_cn_workday
+            from datetime import datetime
+
+            # 检查今天是否真的是工作日/休息日(考虑节假日调休)
+            today = datetime.now().date()
+            actual_is_workday = is_cn_workday(today)
+
+            # 如果实际情况与预期不符,跳过执行
+            # 例如: 周一是中秋节(休息日), 但cron按周一触发了工作日任务
+            if actual_is_workday != is_workday:
+                logger.info(f"今天实际是{'工作日' if actual_is_workday else '休息日'},跳过任务")
+                return
+
+            # 执行健康建议生成
+            generate_health_advice(self.config_path)
+
+        except Exception as e:
+            logger.error(f"健康建议任务异常: {e}")
 
     def _backup_database(self):
         """执行数据库备份"""
@@ -470,7 +563,7 @@ def main():
     parser.add_argument(
         '--task',
         choices=['crypto', 'fund', 'snapshot', 'distribution', 'report', 'alert',
-                 'weekly', 'monthly', 'financial_report', 'milestone', 'holding', 'summary'],
+                 'weekly', 'monthly', 'financial_report', 'milestone', 'holding', 'summary', 'health', 'weight_reminder'],
         help='只运行指定任务一次'
     )
 
@@ -508,6 +601,10 @@ def main():
                 result = check_holding_periods(args.config)
             elif args.task == 'summary':
                 result = generate_error_summary(args.config)
+            elif args.task == 'health':
+                result = generate_health_advice(args.config)
+            elif args.task == 'weight_reminder':
+                result = check_weight_reminder(args.config)
             logger.info(f"任务结果: {result}")
         else:
             logger.info("执行所有任务一次...")

@@ -255,6 +255,10 @@ class Config:
             'model': 'deepseek-chat'
         })
 
+    def get_health_config(self):
+        """获取健康管理配置"""
+        return self.data.get('health', {})
+
     # ===== 通用方法 =====
 
     def save(self):

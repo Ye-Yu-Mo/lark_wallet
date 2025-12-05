@@ -114,6 +114,10 @@ class MonthlyReportTask:
         app_token = account_info.get('app_token')
         table_id = account_info.get('table_id')
         display_name = account_info.get('name', account_name)
+        currency = account_info.get('currency', '¥')  # 获取货币符号，默认人民币
+
+        # 从period元组中提取年份和月份
+        target_year, target_month = period
         
         try:
             # 1. 获取字段定义 (找到 日期, 收支, 分类, 金额 等字段)
@@ -127,16 +131,40 @@ class MonthlyReportTask:
                     logger.error(f"账本 '{account_name}' 缺少字段 '{req}'，无法生成报告")
                     return
 
-            # 2. 拉取数据 (全量拉取后本地过滤，适用于数据量不大的情况)
-            # 如果数据量很大，应该用 filter 参数。但考虑到这是月报，每个月跑一次，全量拉取也是可接受的 (假设 < 50000 条)
-            all_records = []
-            page_token = None
-            has_more = True
-            
-            while has_more:
-                records, page_token, has_more = self.feishu.list_records(app_token, table_id, page_token=page_token, page_size=500)
-                all_records.extend(records)
-                time.sleep(0.1)
+            # 2. 拉取数据 (优化: 使用月份字段筛选)
+            # 月份字段格式: "12 月"
+            month_str = f"{target_month} 月"
+
+            # 尝试使用月份字段筛选 (如果失败则全量拉取)
+            try:
+                logger.info(f"使用月份字段筛选: {month_str}")
+                all_records_raw = self.feishu.search_records(
+                    app_token=app_token,
+                    table_id=table_id,
+                    filter_conditions={
+                        "conjunction": "and",
+                        "conditions": [{
+                            "field_name": "月份",
+                            "operator": "is",
+                            "value": [month_str]
+                        }]
+                    },
+                    page_size=500
+                )
+                # search_records返回的是列表，需要转换成list_records的格式
+                all_records = all_records_raw
+                logger.info(f"通过月份筛选获取到 {len(all_records)} 条记录")
+            except Exception as e:
+                logger.warning(f"月份筛选失败 ({e})，改用全量拉取")
+                # 回退到全量拉取
+                all_records = []
+                page_token = None
+                has_more = True
+
+                while has_more:
+                    records, page_token, has_more = self.feishu.list_records(app_token, table_id, page_token=page_token, page_size=500)
+                    all_records.extend(records)
+                    time.sleep(0.1)
                 
             # 3. 过滤和统计
             stats = {
@@ -144,7 +172,13 @@ class MonthlyReportTask:
                 'expense': 0.0,
                 'category_expense': defaultdict(float),
                 'category_income': defaultdict(float),
-                'count': 0
+                'purpose_expense': defaultdict(float),  # 新增：按支出目的统计
+                'subcat_expense': defaultdict(float),  # 新增：按细类统计
+                'count': 0,
+                'expense_count': 0,  # 新增：支出笔数
+                'income_count': 0,   # 新增：收入笔数
+                'max_expense': 0.0,  # 新增：单笔最大支出
+                'max_expense_note': '',  # 新增：最大支出备注
             }
             
             for record in all_records:
@@ -171,12 +205,43 @@ class MonthlyReportTask:
                 # 收支类型
                 io_type = str(fields.get('收支', '')).strip()
                 category = str(fields.get('分类', '其他')).strip()
-                
+                purpose = str(fields.get('支出目的', '')).strip()
+
+                # 处理备注（可能是数组格式）
+                note_field = fields.get('备注', '')
+                if isinstance(note_field, list):
+                    note = note_field[0].get('text', '') if note_field else ''
+                else:
+                    note = str(note_field).strip()
+
+                # 处理细类（可能是数组格式）
+                subcat_field = fields.get('细类', '')
+                if isinstance(subcat_field, list):
+                    subcat = subcat_field[0].get('text', '') if subcat_field else ''
+                else:
+                    subcat = str(subcat_field).strip()
+
                 if io_type == '支出':
                     stats['expense'] += amount
+                    stats['expense_count'] += 1
                     stats['category_expense'][category] += amount
+
+                    # 记录支出目的
+                    if purpose:
+                        stats['purpose_expense'][purpose] += amount
+
+                    # 记录细类
+                    if subcat:
+                        stats['subcat_expense'][subcat] += amount
+
+                    # 记录最大支出
+                    if amount > stats['max_expense']:
+                        stats['max_expense'] = amount
+                        stats['max_expense_note'] = note
+
                 elif io_type == '收入':
                     stats['income'] += amount
+                    stats['income_count'] += 1
                     stats['category_income'][category] += amount
             
             # 3.1 获取资产数据 (仅针对特定账号)
@@ -187,39 +252,70 @@ class MonthlyReportTask:
                     total_val = 0.0
                     total_profit = 0.0
                     total_cost = 0.0
-                    
+
+                    # 按资产类别统计
+                    asset_by_type = defaultdict(lambda: {'value': 0.0, 'profit': 0.0, 'cost': 0.0})
+                    asset_details = []  # 存储每个资产的详细信息
+
                     for h in holdings:
                         fields = h.get('fields', {})
                         # 解析数值 (飞书字段可能是 list/dict/number)
-                        
+
                         def parse_num(v):
                             if isinstance(v, (int, float)): return float(v)
                             if isinstance(v, list) and v: return parse_num(v[0])
                             if isinstance(v, dict): return parse_num(v.get('value') or v.get('text'))
                             return 0.0
 
+                        def parse_text(v):
+                            if isinstance(v, str): return v
+                            if isinstance(v, list) and v: return parse_text(v[0])
+                            if isinstance(v, dict): return str(v.get('text', ''))
+                            return str(v) if v else ''
+
                         val = parse_num(fields.get('当前市值'))
                         profit = parse_num(fields.get('收益金额'))
                         cost = parse_num(fields.get('总成本'))
-                        
+                        asset_type = parse_text(fields.get('资产类别'))
+                        asset_name = parse_text(fields.get('资产名称'))
+                        profit_rate = parse_num(fields.get('收益率'))
+
                         total_val += val
                         total_profit += profit
                         total_cost += cost
-                        
+
+                        # 按类别统计
+                        if asset_type:
+                            asset_by_type[asset_type]['value'] += val
+                            asset_by_type[asset_type]['profit'] += profit
+                            asset_by_type[asset_type]['cost'] += cost
+
+                        # 记录详细信息（只记录有价值的资产）
+                        if val > 0:
+                            asset_details.append({
+                                'name': asset_name,
+                                'type': asset_type,
+                                'value': val,
+                                'profit': profit,
+                                'profit_rate': profit_rate
+                            })
+
                     stats['asset_total_value'] = total_val
                     stats['asset_total_profit'] = total_profit
                     stats['asset_profit_rate'] = (total_profit / total_cost * 100) if total_cost > 0 else 0
-                    logger.info(f"已获取资产数据: 市值 {total_val}, 收益 {total_profit}")
-                    
+                    stats['asset_by_type'] = dict(asset_by_type)
+                    stats['asset_details'] = sorted(asset_details, key=lambda x: x['value'], reverse=True)[:10]  # Top 10
+                    logger.info(f"已获取资产数据: 市值 {total_val}, 收益 {total_profit}, 持仓数 {len(asset_details)}")
+
                 except Exception as e:
                     logger.error(f"获取资产数据失败: {e}")
 
             # 4. 获取 AI 建议 (新增)
             period_str = f"{period[0]}年{period[1]}月"
-            ai_advice = get_financial_advice(self.config, period_str, stats)
+            ai_advice = get_financial_advice(self.config, period_str, stats, account_name=account_name)
 
             # 5. 生成报告
-            html_content = self._render_html(display_name, period, stats, ai_advice)
+            html_content = self._render_html(display_name, period, stats, ai_advice, currency)
             
             # 6. 发送邮件
             subject = f"{period[0]}年{period[1]}月财务报告 - {display_name}"
@@ -231,7 +327,7 @@ class MonthlyReportTask:
         except Exception as e:
             logger.error(f"生成账本 '{account_name}' 月报失败: {e}")
 
-    def _render_html(self, account_name, period, stats, ai_advice=""):
+    def _render_html(self, account_name, period, stats, ai_advice="", currency="¥"):
         """渲染HTML报告"""
         year, month = period
         balance = stats['income'] - stats['expense']
@@ -285,15 +381,15 @@ class MonthlyReportTask:
             <div class="summary">
                 <div class="summary-item">
                     <div>总收入</div>
-                    <div class="summary-val income">+¥{stats['income']:,.2f}</div>
+                    <div class="summary-val income">+{currency}{stats['income']:,.2f}</div>
                 </div>
                 <div class="summary-item">
                     <div>总支出</div>
-                    <div class="summary-val expense">-¥{stats['expense']:,.2f}</div>
+                    <div class="summary-val expense">-{currency}{stats['expense']:,.2f}</div>
                 </div>
                 <div class="summary-item">
                     <div>结余</div>
-                    <div class="summary-val balance">¥{balance:,.2f}</div>
+                    <div class="summary-val balance">{currency}{balance:,.2f}</div>
                 </div>
             </div>
             
@@ -315,7 +411,7 @@ class MonthlyReportTask:
             html += f"""
                     <tr>
                         <td>{cat}</td>
-                        <td>¥{amt:,.2f}</td>
+                        <td>{currency}{amt:,.2f}</td>
                         <td>{percent:.1f}%</td>
                         <td>
                             <div class="bar-container">
@@ -329,7 +425,58 @@ class MonthlyReportTask:
                 </tbody>
             </table>
         """
-        
+
+        # 支出目的分布
+        sorted_purpose = sorted(stats.get('purpose_expense', {}).items(), key=lambda x: x[1], reverse=True)
+        if sorted_purpose:
+            html += f"""
+            <h3>支出目的分布 ({len(sorted_purpose)} 类)</h3>
+            <table>
+                <thead>
+                    <tr><th>支出目的</th><th>金额</th><th>占比</th></tr>
+                </thead>
+                <tbody>
+            """
+            for purpose, amt in sorted_purpose:
+                percent = (amt / stats['expense'] * 100) if stats['expense'] > 0 else 0
+                html += f"""
+                    <tr>
+                        <td>{purpose}</td>
+                        <td>{currency}{amt:,.2f}</td>
+                        <td>{percent:.1f}%</td>
+                    </tr>
+                """
+            html += """
+                </tbody>
+            </table>
+            """
+
+        # 细类分布(支出)
+        sorted_subcat = sorted(stats.get('subcat_expense', {}).items(), key=lambda x: x[1], reverse=True)
+        if sorted_subcat:
+            html += f"""
+            <h3>细类分布(支出) ({len(sorted_subcat)} 类)</h3>
+            <table>
+                <thead>
+                    <tr><th>细类</th><th>金额</th><th>占比</th></tr>
+                </thead>
+                <tbody>
+            """
+            for subcat, amt in sorted_subcat:
+                percent = (amt / stats['expense'] * 100) if stats['expense'] > 0 else 0
+                html += f"""
+                    <tr>
+                        <td>{subcat}</td>
+                        <td>{currency}{amt:,.2f}</td>
+                        <td>{percent:.1f}%</td>
+                    </tr>
+                """
+            html += """
+                </tbody>
+            </table>
+            """
+
+        # 收入构成
         if sorted_income:
             html += """
             <h3>收入构成</h3>
@@ -344,7 +491,7 @@ class MonthlyReportTask:
                 html += f"""
                     <tr>
                         <td>{cat}</td>
-                        <td>¥{amt:,.2f}</td>
+                        <td>{currency}{amt:,.2f}</td>
                         <td>{percent:.1f}%</td>
                     </tr>
                 """
@@ -352,7 +499,88 @@ class MonthlyReportTask:
                 </tbody>
             </table>
             """
-            
+
+        # 投资组合（仅jasxu）
+        if 'asset_total_value' in stats:
+            asset_details = stats.get('asset_details', [])
+            asset_by_type = stats.get('asset_by_type', {})
+
+            html += f"""
+            <h3>投资组合概览</h3>
+            <div class="summary" style="margin-bottom: 20px;">
+                <div class="summary-item">
+                    <div>总市值</div>
+                    <div class="summary-val balance">{currency}{stats['asset_total_value']:,.2f}</div>
+                </div>
+                <div class="summary-item">
+                    <div>累计收益</div>
+                    <div class="summary-val {'income' if stats['asset_total_profit'] >= 0 else 'expense'}">
+                        {'+' if stats['asset_total_profit'] >= 0 else '-'}{currency}{abs(stats['asset_total_profit']):,.2f}
+                    </div>
+                </div>
+                <div class="summary-item">
+                    <div>收益率</div>
+                    <div class="summary-val {'income' if stats['asset_profit_rate'] >= 0 else 'expense'}">
+                        {stats['asset_profit_rate']:+.2f}%
+                    </div>
+                </div>
+            </div>
+            """
+
+            # 资产类别分布
+            if asset_by_type:
+                html += """
+                <h4>资产类别分布</h4>
+                <table>
+                    <thead>
+                        <tr><th>类别</th><th>市值</th><th>占比</th><th>收益</th><th>收益率</th></tr>
+                    </thead>
+                    <tbody>
+                """
+                for atype, data in sorted(asset_by_type.items(), key=lambda x: x[1]['value'], reverse=True):
+                    type_val = data['value']
+                    type_profit = data['profit']
+                    type_rate = (type_profit / data['cost'] * 100) if data['cost'] > 0 else 0
+                    percent = (type_val / stats['asset_total_value'] * 100) if stats['asset_total_value'] > 0 else 0
+                    html += f"""
+                        <tr>
+                            <td>{atype}</td>
+                            <td>{currency}{type_val:,.2f}</td>
+                            <td>{percent:.1f}%</td>
+                            <td class="{'income' if type_profit >= 0 else 'expense'}">{currency}{type_profit:+,.2f}</td>
+                            <td class="{'income' if type_rate >= 0 else 'expense'}">{type_rate:+.2f}%</td>
+                        </tr>
+                    """
+                html += """
+                    </tbody>
+                </table>
+                """
+
+            # Top 10 持仓
+            if asset_details:
+                html += """
+                <h4>Top 10 持仓</h4>
+                <table>
+                    <thead>
+                        <tr><th>资产名称</th><th>类别</th><th>市值</th><th>收益</th><th>收益率</th></tr>
+                    </thead>
+                    <tbody>
+                """
+                for asset in asset_details:
+                    html += f"""
+                        <tr>
+                            <td>{asset['name']}</td>
+                            <td>{asset['type']}</td>
+                            <td>{currency}{asset['value']:,.2f}</td>
+                            <td class="{'income' if asset['profit'] >= 0 else 'expense'}">{currency}{asset['profit']:+,.2f}</td>
+                            <td class="{'income' if asset['profit_rate'] >= 0 else 'expense'}">{asset['profit_rate']:+.2f}%</td>
+                        </tr>
+                    """
+                html += """
+                    </tbody>
+                </table>
+                """
+
         html += f"""
             <div class="footer">
                 生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 由 Feishu Asset Sync & DeepSeek AI 生成
